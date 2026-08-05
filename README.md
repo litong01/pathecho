@@ -108,6 +108,98 @@ Reset all configured responses:
 curl -X POST 'http://localhost:9095/RESET'
 ```
 
+## Test OAuth provider
+
+Pathecho can run an in-memory OAuth 2.0/OIDC test provider. The `/oauth/*`
+paths are reserved for this feature. Configure it after startup:
+
+```shell
+curl -X POST 'http://localhost:9095/oauth?DO=setup' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "issuer": "http://localhost:9095/oauth",
+    "audience": "test-api",
+    "tokenTTL": "1h",
+    "defaultUser": "alice",
+    "claims": {"tenant": "test"},
+    "clients": {
+      "test-client": {
+        "secret": "test-secret",
+        "redirectURIs": ["http://localhost:3000/callback"],
+        "scopes": ["openid", "profile", "api.read"]
+      }
+    },
+    "users": {
+      "alice": {
+        "password": "alice-password",
+        "claims": {
+          "sub": "user-alice",
+          "email": "alice@example.com",
+          "roles": ["admin"]
+        }
+      }
+    }
+  }'
+```
+
+The issuer must end in `/oauth`. Setup generates an in-memory RSA signing key
+unless `privateKeyPEM` supplies a PKCS#1 or PKCS#8 RSA private key. Setup again
+replaces the configuration, rotates generated keys, and invalidates existing
+codes and refresh tokens.
+
+The provider exposes:
+
+- `GET /oauth/.well-known/openid-configuration`
+- `GET /.well-known/oauth-authorization-server/oauth`
+- `GET /oauth/jwks`
+- `GET /oauth/authorize`
+- `POST /oauth/token`
+
+All four supported grants use form-encoded token requests. Client credentials:
+
+```shell
+curl -X POST 'http://localhost:9095/oauth/token' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials&client_id=test-client&client_secret=test-secret&scope=api.read'
+```
+
+Password grant (legacy and intended only for tests):
+
+```shell
+curl -X POST 'http://localhost:9095/oauth/token' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=password&client_id=test-client&client_secret=test-secret&username=alice&password=alice-password&scope=openid profile'
+```
+
+Authorization code requests require a registered redirect URI. There is no
+login UI: `login_hint` selects a configured user, or `defaultUser` is used,
+and the provider immediately redirects with a short-lived one-time code.
+PKCE `plain` and `S256` are supported.
+
+Exchange the returned code at `/oauth/token` with
+`grant_type=authorization_code`, `code`, the same `redirect_uri`, and
+`code_verifier` when PKCE was used. User grants return a refresh token when
+the `refresh_token` grant is enabled:
+
+```shell
+curl -X POST 'http://localhost:9095/oauth/token' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=refresh_token&client_id=test-client&client_secret=test-secret&refresh_token=<token>'
+```
+
+The enabled grants default to `authorization_code`, `client_credentials`,
+`refresh_token`, and `password`. Use `enabledGrants` during setup to restrict
+that list; it cannot be empty. A client's `scopes` value is an allow-list
+(`["*"]` allows any requested scope). Reset the provider and discard all
+in-memory keys and tokens with:
+
+```shell
+curl -X POST 'http://localhost:9095/oauth?DO=reset'
+```
+
+This provider is for testing only. Users, plaintext test passwords, clients,
+keys, authorization codes, and refresh tokens are not persisted.
+
 
 # To use pathecho in k8s env with tls on
 Create a tls secret, then use the secret when configures the

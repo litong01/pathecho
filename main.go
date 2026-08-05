@@ -97,6 +97,7 @@ func handlerFunc(w http.ResponseWriter, r *http.Request) {
 func newRouter(store ResponseStore) *mux.Router {
 	r := mux.NewRouter()
 	stubs := newStubService(store)
+	oauth := newOAuthService()
 
 	r.PathPrefix("/healthz").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t := time.Now()
@@ -129,6 +130,23 @@ func newRouter(store ResponseStore) *mux.Router {
 	})
 
 	r.Path("/RESET").Methods("POST").HandlerFunc(stubs.handleGlobalReset)
+
+	r.Path("/oauth").Methods("POST").HandlerFunc(oauth.handleControl)
+	r.Path("/oauth/authorize").Methods("GET").HandlerFunc(oauth.handleAuthorize)
+	r.Path("/oauth/token").Methods("POST").HandlerFunc(oauth.handleToken)
+	r.Path("/oauth/jwks").Methods("GET").HandlerFunc(oauth.handleJWKS)
+	r.Path("/oauth/.well-known/openid-configuration").Methods("GET").HandlerFunc(oauth.handleDiscovery)
+	r.Path("/oauth/.well-known/oauth-authorization-server").Methods("GET").HandlerFunc(oauth.handleDiscovery)
+	r.Path("/.well-known/oauth-authorization-server/oauth").Methods("GET").HandlerFunc(oauth.handleDiscovery)
+
+	r.Path("/oauth").HandlerFunc(oauthMethodNotAllowed(http.MethodPost))
+	r.Path("/oauth/authorize").HandlerFunc(oauthMethodNotAllowed(http.MethodGet))
+	r.Path("/oauth/token").HandlerFunc(oauthMethodNotAllowed(http.MethodPost))
+	r.Path("/oauth/jwks").HandlerFunc(oauthMethodNotAllowed(http.MethodGet))
+	r.Path("/oauth/.well-known/openid-configuration").HandlerFunc(oauthMethodNotAllowed(http.MethodGet))
+	r.Path("/oauth/.well-known/oauth-authorization-server").HandlerFunc(oauthMethodNotAllowed(http.MethodGet))
+	r.Path("/.well-known/oauth-authorization-server/oauth").HandlerFunc(oauthMethodNotAllowed(http.MethodGet))
+	r.PathPrefix("/oauth/").HandlerFunc(oauthEndpointNotFound)
 
 	r.PathPrefix("/").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if stubs.serveConfigured(w, r) {
