@@ -28,11 +28,11 @@ type responseKey struct {
 }
 
 type responseEntry struct {
-	Status       int
-	Headers      http.Header
-	BodyTemplate *template.Template // set when response.body is a JSON string
-	BodyJSON     json.RawMessage    // set when response.body is a JSON object/array
-	Remaining    int
+	Status          int
+	HeaderTemplates map[string]*template.Template
+	BodyTemplate    *template.Template // set when response.body is a JSON string
+	BodyJSON        json.RawMessage    // set when response.body is a JSON object/array
+	Remaining       int
 }
 
 // ResponseStore hides the backing store so a shared implementation can be
@@ -216,16 +216,17 @@ func (s *stubService) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	headers := make(http.Header, len(request.Response.Headers))
-	for name, value := range request.Response.Headers {
-		headers.Set(name, value)
+	headerTemplates, err := compileResponseHeaders(method+" "+r.URL.Path, request.Response.Headers, s.funcs)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
 	}
 	entry := &responseEntry{
-		Status:       status,
-		Headers:      headers,
-		BodyTemplate: bodyTemplate,
-		BodyJSON:     bodyJSON,
-		Remaining:    remaining,
+		Status:          status,
+		HeaderTemplates: headerTemplates,
+		BodyTemplate:    bodyTemplate,
+		BodyJSON:        bodyJSON,
+		Remaining:       remaining,
 	}
 	s.store.Set(method, r.URL.Path, entry)
 
@@ -283,8 +284,13 @@ func (s *stubService) serveConfigured(w http.ResponseWriter, r *http.Request) bo
 		Now:    time.Now().UTC(),
 	}
 
+	responseHeaders, err := renderResponseHeaders(entry.HeaderTemplates, data)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("response header template failed: %w", err))
+		return true
+	}
+
 	var output []byte
-	var err error
 	if entry.BodyJSON != nil {
 		output, err = renderJSONBody(entry.BodyJSON, data, s.funcs)
 	} else {
@@ -300,13 +306,13 @@ func (s *stubService) serveConfigured(w http.ResponseWriter, r *http.Request) bo
 		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("rendered response exceeds %d bytes", maxRenderedSize))
 		return true
 	}
-	if strings.Contains(strings.ToLower(entry.Headers.Get("Content-Type")), "application/json") &&
+	if strings.Contains(strings.ToLower(responseHeaders.Get("Content-Type")), "application/json") &&
 		!json.Valid(output) {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("response template produced invalid JSON"))
 		return true
 	}
 
-	for name, values := range entry.Headers {
+	for name, values := range responseHeaders {
 		for _, value := range values {
 			w.Header().Add(name, value)
 		}
@@ -371,6 +377,44 @@ func parseTemplate(name, source string, funcs template.FuncMap) (*template.Templ
 		return nil, fmt.Errorf("invalid response template: %w", err)
 	}
 	return tmpl, nil
+}
+
+func compileResponseHeaders(
+	name string,
+	headers map[string]string,
+	funcs template.FuncMap,
+) (map[string]*template.Template, error) {
+	compiled := make(map[string]*template.Template, len(headers))
+	for headerName, value := range headers {
+		tmpl, err := parseTemplate(name+" header "+headerName, value, funcs)
+		if err != nil {
+			return nil, fmt.Errorf("invalid response header %q: %w", headerName, err)
+		}
+		compiled[http.CanonicalHeaderKey(headerName)] = tmpl
+	}
+	return compiled, nil
+}
+
+func renderResponseHeaders(
+	templates map[string]*template.Template,
+	data templateData,
+) (http.Header, error) {
+	headers := make(http.Header, len(templates))
+	for name, tmpl := range templates {
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, data); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		if buf.Len() > maxRenderedSize {
+			return nil, fmt.Errorf("%s exceeds %d bytes", name, maxRenderedSize)
+		}
+		value := buf.String()
+		if strings.ContainsAny(value, "\r\n") {
+			return nil, fmt.Errorf("%s contains a newline", name)
+		}
+		headers.Set(name, value)
+	}
+	return headers, nil
 }
 
 func validateJSONTemplates(name string, value any, funcs template.FuncMap) error {

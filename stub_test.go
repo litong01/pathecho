@@ -67,6 +67,42 @@ func TestConfiguredResponseRendersRequestDataAndFunctions(t *testing.T) {
 	}
 }
 
+func TestConfiguredHeadersRenderRequestData(t *testing.T) {
+	router := newRouter(newMemoryStore())
+	response := performJSONRequest(t, router, http.MethodPost, "/authorize?DO=setup", map[string]any{
+		"method": http.MethodGet,
+		"response": map[string]any{
+			"status": http.StatusFound,
+			"headers": map[string]string{
+				"Location":  "{{.Q.redirect_uri}}?code=test-code&state={{.Q.state}}",
+				"X-Request": "{{index .H `X-Test`}}",
+			},
+		},
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("setup status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/authorize?redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&state=request-state",
+		nil,
+	)
+	request.Header.Set("X-Test", "request-header")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusFound {
+		t.Fatalf("redirect status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Location"); got != "https://client.example/callback?code=test-code&state=request-state" {
+		t.Fatalf("Location = %q", got)
+	}
+	if got := response.Header().Get("X-Request"); got != "request-header" {
+		t.Fatalf("X-Request = %q", got)
+	}
+}
+
 func TestConfiguredResponsesAreMethodSpecific(t *testing.T) {
 	router := newRouter(newMemoryStore())
 	performSetup(t, router, "/same", http.MethodPost, "configured post", nil)
@@ -181,6 +217,16 @@ func TestInvalidTemplatesAndMathErrorsAreReported(t *testing.T) {
 	})
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown function setup status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response = performJSONRequest(t, router, http.MethodPost, "/bad-header?DO=setup", map[string]any{
+		"method": http.MethodGet,
+		"response": map[string]any{
+			"headers": map[string]string{"Location": `{{unknownFunction}}`},
+		},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown header function setup status = %d, body = %s", response.Code, response.Body.String())
 	}
 
 	performSetup(t, router, "/math", http.MethodGet, `{{sqrt -1}}`, nil)

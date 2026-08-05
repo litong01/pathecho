@@ -45,13 +45,30 @@ The configured response is matched by method and path:
 curl 'http://localhost:9095/users?name=Sam&age=30&user-id=u-42'
 ```
 
+Response header values use the same templates. For example, configure a
+dynamic redirect:
+
+```shell
+curl -X POST 'http://localhost:9095/authorize?DO=setup' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "method": "GET",
+    "response": {
+      "status": 302,
+      "headers": {
+        "Location": "{{.Q.redirect_uri}}?code=test-code&state={{.Q.state}}"
+      }
+    }
+  }'
+```
+
 `times` in the setup JSON or `DOTIME` in the setup URL limits how many matched
 requests receive the response. When omitted, the setup remains until it is
 overwritten or reset. Setups are held in memory and are lost when the process
 restarts.
 
-Only `response.body` is rendered as a Go `text/template`. Status and headers
-are fixed at setup time. The template receives:
+String values in `response.body` and response header values are rendered as Go
+`text/template` templates. Status is fixed at setup time. The template receives:
 
 - `.Method`, `.Path`, `.Query`, `.Header`, `.Q`, `.H`, and `.Now`
 - `.Q` / `.H`: first-value maps for query params and request headers
