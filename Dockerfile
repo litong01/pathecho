@@ -1,11 +1,10 @@
-FROM golang:1.20.0-alpine3.17 as BUILDER
+FROM golang:1.26-alpine3.24 AS builder
 ADD . /go/src/github.com/pathecho
 WORKDIR /go/src/github.com/pathecho
-RUN cd /go/src/github.com/pathecho && \
-    go build -o pathecho
+RUN go build -o pathecho
 
-FROM alpine:3.17.1
+FROM alpine:3.24
 WORKDIR /etc/pathecho
-COPY --from=BUILDER /go/src/github.com/pathecho/pathecho /usr/local/bin
+COPY --from=builder /go/src/github.com/pathecho/pathecho /usr/local/bin
 
 CMD ["/usr/local/bin/pathecho"]

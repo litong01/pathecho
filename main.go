@@ -66,17 +66,20 @@ func handlerFunc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
 		w.Header().Set("Content-Type", "application/json")
-		content := `{"status": "Failed", "time": "` + formatted + `, "error":"` + err.Error() + `"}`
-		w.Write([]byte(content))
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "Failed",
+			"time":   formatted,
+			"error":  err.Error(),
+		})
 	} else {
+		w.Header().Set("Content-Type", "application/json")
 		if r.Method == "PUT" {
 			w.WriteHeader(http.StatusOK)
 		} else {
 			w.WriteHeader(http.StatusCreated)
 		}
-		w.Header().Set("Content-Type", "application/json")
 		content := `{"status": "Created", "time": "` + formatted + `"}`
 		if r.Method == "PUT" {
 			content = `{"status": "Updated", "time": "` + formatted + `"}`
@@ -92,16 +95,17 @@ func handlerFunc(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func main() {
-
+func newRouter(store ResponseStore) *mux.Router {
 	r := mux.NewRouter()
+	stubs := newStubService(store)
+
 	r.PathPrefix("/healthz").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t := time.Now()
 		formatted := fmt.Sprintf("%d-%02d-%02dT%02d:%02d:%02d.%07dZ",
 			t.Year(), t.Month(), t.Day(),
 			t.Hour(), t.Minute(), t.Second(), t.Nanosecond())
-		w.WriteHeader(http.StatusOK)
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		content := `{"status":"OK","time":"` + formatted + "\"}"
 		w.Write([]byte(content))
 		Logger.Info("GET", "path", r.RequestURI)
@@ -116,6 +120,7 @@ func main() {
 			w.Write([]byte(content))
 			return
 		}
+		defer resp.Body.Close()
 		data, err := io.ReadAll(resp.Body)
 		if err != nil {
 			w.Write([]byte(content))
@@ -124,17 +129,7 @@ func main() {
 		w.Write(data)
 	})
 
-	r.PathPrefix("/").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(r.RequestURI))
-		Logger.Info("GET", "path", r.RequestURI)
-	})
-
-	r.PathPrefix("/").Methods("POST", "PUT").HandlerFunc(handlerFunc)
-
-	r.PathPrefix("/").Methods("DELETE").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-		Logger.Info("DELETE", "path", r.RequestURI)
-	})
+	r.Path("/RESET").Methods("POST").HandlerFunc(stubs.handleGlobalReset)
 
 	// If this is to setup to deal with protected resources
 	// For protected resouces
@@ -150,6 +145,47 @@ func main() {
 
 		r.Path("/api/callback").Methods("GET").HandlerFunc(authenticator.APICallback)
 	}
+
+	r.PathPrefix("/").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if stubs.serveConfigured(w, r) {
+			return
+		}
+		w.Write([]byte(r.RequestURI))
+		Logger.Info("GET", "path", r.RequestURI)
+	})
+
+	r.PathPrefix("/").Methods("POST").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch controlAction(r) {
+		case "setup":
+			stubs.handleSetup(w, r)
+		case "reset":
+			stubs.handlePathReset(w, r)
+		default:
+			if !stubs.serveConfigured(w, r) {
+				handlerFunc(w, r)
+			}
+		}
+	})
+
+	r.PathPrefix("/").Methods("PUT").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !stubs.serveConfigured(w, r) {
+			handlerFunc(w, r)
+		}
+	})
+
+	r.PathPrefix("/").Methods("DELETE").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if stubs.serveConfigured(w, r) {
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		Logger.Info("DELETE", "path", r.RequestURI)
+	})
+
+	return r
+}
+
+func main() {
+	r := newRouter(newMemoryStore())
 
 	cert := os.Getenv("TLS_CERT")
 	key := os.Getenv("TLS_KEY")
