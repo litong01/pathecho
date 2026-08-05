@@ -149,18 +149,8 @@ spec:
           readOnly: true
 ```
 
-# To use pathecho in docker with security on
+# Run with Docker
 
+```shell
+docker run -dit -p 9095:8080 --rm email4tong/pathecho
 ```
-docker run -dit -p 9095:8080 --rm \
-  -e "issuer=http://integration.astra.netapp.io:8080/realms/astra" \
-  -e "client_id=astraclient" \
-  -e "client_secret=TT09M0T8t6OH301W2wx4ilVJeWxRcieG" \
-  -e "redirect_url=http://integration.astra.netapp.io:9090/" \
-  -e "authURL=http://integration.astra.netapp.io:8080/realms/astra/protocol/openid-connect/auth" \
-  -e "tokenURL=http://integration.astra.netapp.io:8080/realms/astra/protocol/openid-connect/token" \
-  email4tong/pathecho 
-```
-
-
-docker run -dit -p 9095:8080 --rm email4tong/pathecho 

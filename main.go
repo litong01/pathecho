@@ -14,7 +14,6 @@ import (
 	goslog "golang.org/x/exp/slog"
 
 	"github.com/gorilla/mux"
-	"github.com/pathecho/auth"
 )
 
 var (
@@ -130,21 +129,6 @@ func newRouter(store ResponseStore) *mux.Router {
 	})
 
 	r.Path("/RESET").Methods("POST").HandlerFunc(stubs.handleGlobalReset)
-
-	// If this is to setup to deal with protected resources
-	// For protected resouces
-	if auth.IsSecurityEnabled() {
-		secured := r.PathPrefix("/secured").Subrouter()
-		authenticator := auth.New()
-		secured.Use(authenticator.Middleware())
-		// regardless what method call, always write the request uri back
-		// to the body
-		secured.Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(r.RequestURI))
-		})
-
-		r.Path("/api/callback").Methods("GET").HandlerFunc(authenticator.APICallback)
-	}
 
 	r.PathPrefix("/").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if stubs.serveConfigured(w, r) {

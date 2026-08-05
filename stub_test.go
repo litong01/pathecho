@@ -11,7 +11,6 @@ import (
 )
 
 func TestConfiguredResponseRendersRequestDataAndFunctions(t *testing.T) {
-	t.Setenv("issuer", "")
 	router := newRouter(newMemoryStore())
 	setup := map[string]any{
 		"method": "get",
@@ -69,7 +68,6 @@ func TestConfiguredResponseRendersRequestDataAndFunctions(t *testing.T) {
 }
 
 func TestConfiguredResponsesAreMethodSpecific(t *testing.T) {
-	t.Setenv("issuer", "")
 	router := newRouter(newMemoryStore())
 	performSetup(t, router, "/same", http.MethodPost, "configured post", nil)
 
@@ -85,7 +83,6 @@ func TestConfiguredResponsesAreMethodSpecific(t *testing.T) {
 }
 
 func TestDOTIMEExpiresResponseAfterConfiguredHits(t *testing.T) {
-	t.Setenv("issuer", "")
 	router := newRouter(newMemoryStore())
 	setup := map[string]any{
 		"method": http.MethodGet,
@@ -111,7 +108,6 @@ func TestDOTIMEExpiresResponseAfterConfiguredHits(t *testing.T) {
 }
 
 func TestJSONBodyTemplateAndTimesField(t *testing.T) {
-	t.Setenv("issuer", "")
 	router := newRouter(newMemoryStore())
 	response := performJSONRequest(t, router, http.MethodPost, "/object?DO=setup", map[string]any{
 		"method": http.MethodGet,
@@ -137,7 +133,6 @@ func TestJSONBodyTemplateAndTimesField(t *testing.T) {
 }
 
 func TestMethodPathAndGlobalReset(t *testing.T) {
-	t.Setenv("issuer", "")
 	router := newRouter(newMemoryStore())
 	performSetup(t, router, "/reset-me", http.MethodGet, "get response", nil)
 	performSetup(t, router, "/reset-me", http.MethodPost, "post response", nil)
@@ -176,7 +171,6 @@ func TestMethodPathAndGlobalReset(t *testing.T) {
 }
 
 func TestInvalidTemplatesAndMathErrorsAreReported(t *testing.T) {
-	t.Setenv("issuer", "")
 	router := newRouter(newMemoryStore())
 
 	response := performJSONRequest(t, router, http.MethodPost, "/bad?DO=setup", map[string]any{
