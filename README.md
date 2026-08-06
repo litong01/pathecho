@@ -5,6 +5,14 @@ method-appropriate responses (GET echoes the request URI; POST/PUT/DELETE
 return standard success codes). You can also configure per-path, per-method
 stub responses with Go templates, hit limits, and reset controls.
 
+## Project layout
+
+- `cmd/pathecho`: executable startup, logging, and TLS configuration
+- `internal/server`: HTTP router and default request behavior
+- `internal/stub`: configurable stub response engine
+- `internal/oauth`: in-memory OAuth/OIDC test provider
+- `internal/httpapi`: shared HTTP control and JSON helpers
+
 ## Configure stub responses
 
 Use a `POST` request with `DO=setup` to configure a response for a method and
@@ -65,7 +73,8 @@ curl -X POST 'http://localhost:9095/authorize?DO=setup' \
 `times` in the setup JSON or `DOTIME` in the setup URL limits how many matched
 requests receive the response. When omitted, the setup remains until it is
 overwritten or reset. Setups are held in memory and are lost when the process
-restarts.
+restarts. The server stores at most 1,024 configured responses; setup request
+bodies and rendered response bodies/headers are limited to 1 MiB.
 
 String values in `response.body` and response header values are rendered as Go
 `text/template` templates. Status is fixed at setup time. The template receives:
@@ -145,7 +154,7 @@ curl -X POST 'http://localhost:9095/oauth?DO=setup' \
 The issuer must end in `/oauth`. Setup generates an in-memory RSA signing key
 unless `privateKeyPEM` supplies a PKCS#1 or PKCS#8 RSA private key. Setup again
 replaces the configuration, rotates generated keys, and invalidates existing
-codes and refresh tokens.
+codes and refresh tokens. Imported RSA keys must be at least 2,048 bits.
 
 The provider exposes:
 
@@ -174,7 +183,9 @@ curl -X POST 'http://localhost:9095/oauth/token' \
 Authorization code requests require a registered redirect URI. There is no
 login UI: `login_hint` selects a configured user, or `defaultUser` is used,
 and the provider immediately redirects with a short-lived one-time code.
-PKCE `plain` and `S256` are supported.
+PKCE `plain` and `S256` are supported and required for clients without a
+secret. Public clients cannot use the `client_credentials` or `password`
+grants.
 
 Exchange the returned code at `/oauth/token` with
 `grant_type=authorization_code`, `code`, the same `redirect_uri`, and
@@ -262,4 +273,16 @@ spec:
 
 ```shell
 docker run -dit -p 9095:8080 --rm email4tong/pathecho
+```
+
+# Build container image:
+
+```
+docker build -t email4tong/pathecho .
+```
+
+# Run the test
+
+```
+go test ./...
 ```

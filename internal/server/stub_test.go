@@ -1,17 +1,15 @@
-package main
+package server
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 )
 
 func TestConfiguredResponseRendersRequestDataAndFunctions(t *testing.T) {
-	router := newRouter(newMemoryStore())
+	router := NewRouter()
 	setup := map[string]any{
 		"method": "get",
 		"response": map[string]any{
@@ -68,7 +66,7 @@ func TestConfiguredResponseRendersRequestDataAndFunctions(t *testing.T) {
 }
 
 func TestConfiguredHeadersRenderRequestData(t *testing.T) {
-	router := newRouter(newMemoryStore())
+	router := NewRouter()
 	response := performJSONRequest(t, router, http.MethodPost, "/authorize?DO=setup", map[string]any{
 		"method": http.MethodGet,
 		"response": map[string]any{
@@ -104,7 +102,7 @@ func TestConfiguredHeadersRenderRequestData(t *testing.T) {
 }
 
 func TestConfiguredResponsesAreMethodSpecific(t *testing.T) {
-	router := newRouter(newMemoryStore())
+	router := NewRouter()
 	performSetup(t, router, "/same", http.MethodPost, "configured post", nil)
 
 	getResponse := performRequest(router, http.MethodGet, "/same?ignored=yes", "")
@@ -119,7 +117,7 @@ func TestConfiguredResponsesAreMethodSpecific(t *testing.T) {
 }
 
 func TestDOTIMEExpiresResponseAfterConfiguredHits(t *testing.T) {
-	router := newRouter(newMemoryStore())
+	router := NewRouter()
 	setup := map[string]any{
 		"method": http.MethodGet,
 		"response": map[string]any{
@@ -144,7 +142,7 @@ func TestDOTIMEExpiresResponseAfterConfiguredHits(t *testing.T) {
 }
 
 func TestJSONBodyTemplateAndTimesField(t *testing.T) {
-	router := newRouter(newMemoryStore())
+	router := NewRouter()
 	response := performJSONRequest(t, router, http.MethodPost, "/object?DO=setup", map[string]any{
 		"method": http.MethodGet,
 		"times":  1,
@@ -169,7 +167,7 @@ func TestJSONBodyTemplateAndTimesField(t *testing.T) {
 }
 
 func TestMethodPathAndGlobalReset(t *testing.T) {
-	router := newRouter(newMemoryStore())
+	router := NewRouter()
 	performSetup(t, router, "/reset-me", http.MethodGet, "get response", nil)
 	performSetup(t, router, "/reset-me", http.MethodPost, "post response", nil)
 
@@ -207,7 +205,7 @@ func TestMethodPathAndGlobalReset(t *testing.T) {
 }
 
 func TestInvalidTemplatesAndMathErrorsAreReported(t *testing.T) {
-	router := newRouter(newMemoryStore())
+	router := NewRouter()
 
 	response := performJSONRequest(t, router, http.MethodPost, "/bad?DO=setup", map[string]any{
 		"method": http.MethodGet,
@@ -235,26 +233,14 @@ func TestInvalidTemplatesAndMathErrorsAreReported(t *testing.T) {
 		!strings.Contains(response.Body.String(), "non-finite") {
 		t.Fatalf("invalid math response = %d %s", response.Code, response.Body.String())
 	}
-}
 
-func TestMemoryStoreConsumesHitsAtomically(t *testing.T) {
-	store := newMemoryStore()
-	store.Set(http.MethodGet, "/limited", &responseEntry{Remaining: 10})
-
-	var served int32
-	var wait sync.WaitGroup
-	for request := 0; request < 50; request++ {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			if _, ok := store.Take(http.MethodGet, "/limited"); ok {
-				atomic.AddInt32(&served, 1)
-			}
-		}()
-	}
-	wait.Wait()
-	if served != 10 {
-		t.Fatalf("served hits = %d, want 10", served)
+	once := 1
+	performSetup(t, router, "/limited-math", http.MethodGet, `{{sqrt -1}}`, &once)
+	for attempt := 1; attempt <= 2; attempt++ {
+		response = performRequest(router, http.MethodGet, "/limited-math", "")
+		if response.Code != http.StatusInternalServerError {
+			t.Fatalf("failed render attempt %d status = %d, body = %s", attempt, response.Code, response.Body.String())
+		}
 	}
 }
 

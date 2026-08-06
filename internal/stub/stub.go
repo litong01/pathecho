@@ -1,11 +1,10 @@
-package main
+package stub
 
 import (
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"reflect"
@@ -14,13 +13,18 @@ import (
 	"sync"
 	"text/template"
 	"time"
+
+	"github.com/pathecho/internal/httpapi"
+	goslog "golang.org/x/exp/slog"
 )
 
 const (
-	maxSetupBodySize = 1 << 20 // 1 MiB
-	maxRenderedSize  = 1 << 20 // 1 MiB
-	unlimitedHits    = -1
+	maxRenderedSize    = 1 << 20 // 1 MiB
+	maxStoredResponses = 1024
+	unlimitedHits      = -1
 )
+
+var errRenderedTooLarge = errors.New("rendered response exceeds maximum size")
 
 type responseKey struct {
 	Method string
@@ -33,13 +37,15 @@ type responseEntry struct {
 	BodyTemplate    *template.Template // set when response.body is a JSON string
 	BodyJSON        json.RawMessage    // set when response.body is a JSON object/array
 	Remaining       int
+	InFlight        int
 }
 
-// ResponseStore hides the backing store so a shared implementation can be
+// responseStore hides the backing store so a shared implementation can be
 // added later without changing the HTTP handlers.
-type ResponseStore interface {
-	Set(method, path string, entry *responseEntry)
+type responseStore interface {
+	Set(method, path string, entry *responseEntry) error
 	Take(method, path string) (*responseEntry, bool)
+	Complete(method, path string, entry *responseEntry, success bool)
 	Reset(method, path string) int
 	ResetAll() int
 }
@@ -53,10 +59,15 @@ func newMemoryStore() *memoryStore {
 	return &memoryStore{entries: make(map[responseKey]*responseEntry)}
 }
 
-func (s *memoryStore) Set(method, path string, entry *responseEntry) {
+func (s *memoryStore) Set(method, path string, entry *responseEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries[responseKey{Method: method, Path: path}] = entry
+	key := responseKey{Method: method, Path: path}
+	if _, exists := s.entries[key]; !exists && len(s.entries) >= maxStoredResponses {
+		return fmt.Errorf("response store limit of %d entries reached", maxStoredResponses)
+	}
+	s.entries[key] = entry
+	return nil
 }
 
 // Take gets an entry and atomically consumes one of its allowed hits.
@@ -69,13 +80,37 @@ func (s *memoryStore) Take(method, path string) (*responseEntry, bool) {
 	if !ok {
 		return nil, false
 	}
+	if entry.Remaining == 0 {
+		return nil, false
+	}
 	if entry.Remaining > 0 {
 		entry.Remaining--
-		if entry.Remaining == 0 {
-			delete(s.entries, key)
-		}
+		entry.InFlight++
 	}
 	return entry, true
+}
+
+func (s *memoryStore) Complete(
+	method string,
+	path string,
+	entry *responseEntry,
+	success bool,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := responseKey{Method: method, Path: path}
+	current, ok := s.entries[key]
+	if !ok || current != entry || entry.InFlight == 0 {
+		return
+	}
+	entry.InFlight--
+	if !success {
+		entry.Remaining++
+	}
+	if success && entry.Remaining == 0 && entry.InFlight == 0 {
+		delete(s.entries, key)
+	}
 }
 
 func (s *memoryStore) Reset(method, path string) int {
@@ -137,6 +172,26 @@ type templateData struct {
 	Now time.Time
 }
 
+type limitedBuffer struct {
+	bytes.Buffer
+	remaining *int
+}
+
+func (b *limitedBuffer) Write(data []byte) (int, error) {
+	if *b.remaining <= 0 {
+		return 0, errRenderedTooLarge
+	}
+	if len(data) > *b.remaining {
+		allowed := *b.remaining
+		_, _ = b.Buffer.Write(data[:allowed])
+		*b.remaining = 0
+		return allowed, errRenderedTooLarge
+	}
+	written, err := b.Buffer.Write(data)
+	*b.remaining -= written
+	return written, err
+}
+
 // mapValues is an alias that keeps url.Values.Get available to templates while
 // avoiding a second copy of the query parameters.
 type mapValues map[string][]string
@@ -158,16 +213,28 @@ func firstValues(values map[string][]string) map[string]string {
 	return out
 }
 
-type stubService struct {
-	store ResponseStore
+type Service struct {
+	store responseStore
 	funcs template.FuncMap
 }
 
-func newStubService(store ResponseStore) *stubService {
-	return &stubService{store: store, funcs: templateFunctions()}
+func NewService() *Service {
+	return &Service{store: newMemoryStore(), funcs: templateFunctions()}
 }
 
-func (s *stubService) handleSetup(w http.ResponseWriter, r *http.Request) {
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any, allowEmpty bool) error {
+	return httpapi.DecodeJSONBody(w, r, target, allowEmpty)
+}
+
+func writeJSONError(w http.ResponseWriter, status int, err error) {
+	httpapi.WriteJSONError(w, status, err)
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	httpapi.WriteJSON(w, status, value)
+}
+
+func (s *Service) HandleSetup(w http.ResponseWriter, r *http.Request) {
 	var request setupRequest
 	if err := decodeJSONBody(w, r, &request, false); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err)
@@ -228,7 +295,10 @@ func (s *stubService) handleSetup(w http.ResponseWriter, r *http.Request) {
 		BodyJSON:        bodyJSON,
 		Remaining:       remaining,
 	}
-	s.store.Set(method, r.URL.Path, entry)
+	if err := s.store.Set(method, r.URL.Path, entry); err != nil {
+		writeJSONError(w, http.StatusServiceUnavailable, err)
+		return
+	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"status": "Setup",
@@ -238,7 +308,7 @@ func (s *stubService) handleSetup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *stubService) handlePathReset(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandlePathReset(w http.ResponseWriter, r *http.Request) {
 	var request resetRequest
 	if err := decodeJSONBody(w, r, &request, true); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err)
@@ -259,18 +329,23 @@ func (s *stubService) handlePathReset(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *stubService) handleGlobalReset(w http.ResponseWriter, _ *http.Request) {
+func (s *Service) HandleGlobalReset(w http.ResponseWriter, r *http.Request) {
+	httpapi.DrainBody(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "Reset",
 		"removed": s.store.ResetAll(),
 	})
 }
 
-func (s *stubService) serveConfigured(w http.ResponseWriter, r *http.Request) bool {
+func (s *Service) ServeConfigured(w http.ResponseWriter, r *http.Request) bool {
 	entry, ok := s.store.Take(r.Method, r.URL.Path)
 	if !ok {
 		return false
 	}
+	success := false
+	defer func() {
+		s.store.Complete(r.Method, r.URL.Path, entry, success)
+	}()
 
 	query := r.URL.Query()
 	headers := r.Header.Clone()
@@ -294,7 +369,8 @@ func (s *stubService) serveConfigured(w http.ResponseWriter, r *http.Request) bo
 	if entry.BodyJSON != nil {
 		output, err = renderJSONBody(entry.BodyJSON, data, s.funcs)
 	} else {
-		var buf bytes.Buffer
+		remaining := maxRenderedSize
+		buf := limitedBuffer{remaining: &remaining}
 		err = entry.BodyTemplate.Execute(&buf, data)
 		output = buf.Bytes()
 	}
@@ -319,27 +395,9 @@ func (s *stubService) serveConfigured(w http.ResponseWriter, r *http.Request) bo
 	}
 	w.WriteHeader(entry.Status)
 	_, _ = w.Write(output)
-	Logger.Info(r.Method, "path", r.RequestURI, "configured", true)
+	success = true
+	goslog.Default().Info(r.Method, "path", r.RequestURI, "configured", true)
 	return true
-}
-
-func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any, allowEmpty bool) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxSetupBodySize)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		if allowEmpty && errors.Is(err, io.EOF) {
-			return nil
-		}
-		return fmt.Errorf("invalid JSON body: %w", err)
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err == nil {
-		return fmt.Errorf("invalid JSON body: multiple JSON values")
-	} else if !errors.Is(err, io.EOF) {
-		return fmt.Errorf("invalid JSON body: %w", err)
-	}
-	return nil
 }
 
 func compileResponseBody(name string, raw json.RawMessage, funcs template.FuncMap) (*template.Template, json.RawMessage, error) {
@@ -400,13 +458,11 @@ func renderResponseHeaders(
 	data templateData,
 ) (http.Header, error) {
 	headers := make(http.Header, len(templates))
+	remaining := maxRenderedSize
 	for name, tmpl := range templates {
-		var buf bytes.Buffer
+		buf := limitedBuffer{remaining: &remaining}
 		if err := tmpl.Execute(&buf, data); err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
-		}
-		if buf.Len() > maxRenderedSize {
-			return nil, fmt.Errorf("%s exceeds %d bytes", name, maxRenderedSize)
 		}
 		value := buf.String()
 		if strings.ContainsAny(value, "\r\n") {
@@ -443,21 +499,32 @@ func renderJSONBody(raw json.RawMessage, data templateData, funcs template.FuncM
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return nil, err
 	}
-	rendered, err := renderJSONValue("body", document, data, funcs)
+	remaining := maxRenderedSize
+	rendered, err := renderJSONValue("body", document, data, funcs, &remaining)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(rendered)
+	output, err := json.Marshal(rendered)
+	if err == nil && len(output) > maxRenderedSize {
+		return nil, errRenderedTooLarge
+	}
+	return output, err
 }
 
-func renderJSONValue(name string, value any, data templateData, funcs template.FuncMap) (any, error) {
+func renderJSONValue(
+	name string,
+	value any,
+	data templateData,
+	funcs template.FuncMap,
+	remaining *int,
+) (any, error) {
 	switch typed := value.(type) {
 	case string:
 		tmpl, err := parseTemplate(name, typed, funcs)
 		if err != nil {
 			return nil, err
 		}
-		var buf bytes.Buffer
+		buf := limitedBuffer{remaining: remaining}
 		if err := tmpl.Execute(&buf, data); err != nil {
 			return nil, err
 		}
@@ -470,7 +537,7 @@ func renderJSONValue(name string, value any, data templateData, funcs template.F
 	case []any:
 		out := make([]any, len(typed))
 		for index, item := range typed {
-			rendered, err := renderJSONValue(fmt.Sprintf("%s[%d]", name, index), item, data, funcs)
+			rendered, err := renderJSONValue(fmt.Sprintf("%s[%d]", name, index), item, data, funcs, remaining)
 			if err != nil {
 				return nil, err
 			}
@@ -480,7 +547,7 @@ func renderJSONValue(name string, value any, data templateData, funcs template.F
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, item := range typed {
-			rendered, err := renderJSONValue(name+"."+key, item, data, funcs)
+			rendered, err := renderJSONValue(name+"."+key, item, data, funcs, remaining)
 			if err != nil {
 				return nil, err
 			}
@@ -510,29 +577,11 @@ func queryValueFold(r *http.Request, wanted string) (string, bool) {
 	return "", false
 }
 
-func controlAction(r *http.Request) string {
-	value, ok := queryValueFold(r, "DO")
-	if !ok {
-		return ""
-	}
-	return strings.ToLower(strings.TrimSpace(value))
-}
-
 func remainingValue(remaining int) any {
 	if remaining == unlimitedHits {
 		return "unlimited"
 	}
 	return remaining
-}
-
-func writeJSONError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]any{"status": "Failed", "error": err.Error()})
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
 }
 
 func templateFunctions() template.FuncMap {

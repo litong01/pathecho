@@ -1,4 +1,4 @@
-package main
+package oauth
 
 import (
 	"crypto"
@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pathecho/internal/httpapi"
 )
 
 const (
@@ -24,6 +26,11 @@ const (
 	grantClientCredentials = "client_credentials"
 	grantRefreshToken      = "refresh_token"
 	grantPassword          = "password"
+
+	maxAuthorizationCodes = 1024
+	maxRefreshTokens      = 4096
+	maxStateLength        = 1024
+	minRSAKeyBits         = 2048
 )
 
 var supportedOAuthGrants = []string{
@@ -108,25 +115,55 @@ type refreshTokenEntry struct {
 	expiresAt time.Time
 }
 
-type oauthService struct {
+type Service struct {
 	mu            sync.RWMutex
 	config        *oauthConfig
 	codes         map[string]authorizationCode
 	refreshTokens map[string]refreshTokenEntry
 }
 
-func newOAuthService() *oauthService {
-	return &oauthService{
+func NewService() *Service {
+	return &Service{
 		codes:         make(map[string]authorizationCode),
 		refreshTokens: make(map[string]refreshTokenEntry),
 	}
 }
 
-func (s *oauthService) handleControl(w http.ResponseWriter, r *http.Request) {
+func controlAction(r *http.Request) string {
+	return httpapi.ControlAction(r)
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any, allowEmpty bool) error {
+	return httpapi.DecodeJSONBody(w, r, target, allowEmpty)
+}
+
+func writeJSONError(w http.ResponseWriter, status int, err error) {
+	httpapi.WriteJSONError(w, status, err)
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	httpapi.WriteJSON(w, status, value)
+}
+
+func (s *Service) pruneExpiredLocked(now time.Time) {
+	for code, entry := range s.codes {
+		if !now.Before(entry.expiresAt) {
+			delete(s.codes, code)
+		}
+	}
+	for token, entry := range s.refreshTokens {
+		if !now.Before(entry.expiresAt) {
+			delete(s.refreshTokens, token)
+		}
+	}
+}
+
+func (s *Service) HandleControl(w http.ResponseWriter, r *http.Request) {
 	switch controlAction(r) {
 	case "setup":
 		s.handleSetup(w, r)
 	case "reset":
+		httpapi.DrainBody(r)
 		s.mu.Lock()
 		s.config = nil
 		s.codes = make(map[string]authorizationCode)
@@ -138,7 +175,7 @@ func (s *oauthService) handleControl(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *oauthService) handleSetup(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleSetup(w http.ResponseWriter, r *http.Request) {
 	var request oauthSetupRequest
 	if err := decodeJSONBody(w, r, &request, false); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err)
@@ -226,7 +263,7 @@ func buildOAuthConfig(request oauthSetupRequest) (*oauthConfig, error) {
 		}
 		for _, redirectURI := range client.RedirectURIs {
 			parsed, parseErr := url.Parse(redirectURI)
-			if parseErr != nil || parsed.Scheme == "" || parsed.Fragment != "" {
+			if parseErr != nil || !safeRedirectScheme(parsed.Scheme) || parsed.Fragment != "" {
 				return nil, fmt.Errorf("client %q has invalid redirect URI %q", clientID, redirectURI)
 			}
 		}
@@ -299,6 +336,9 @@ func loadOrGenerateRSAKey(rawPEM string) (*rsa.PrivateKey, error) {
 	if err := key.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid RSA private key: %w", err)
 	}
+	if key.N.BitLen() < minRSAKeyBits {
+		return nil, fmt.Errorf("RSA private key must be at least %d bits", minRSAKeyBits)
+	}
 	return key, nil
 }
 
@@ -311,7 +351,7 @@ func rsaKeyID(key *rsa.PublicKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum[:12]), nil
 }
 
-func (s *oauthService) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
+func (s *Service) HandleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	config, ok := s.currentConfig(w)
 	if !ok {
 		return
@@ -330,7 +370,7 @@ func (s *oauthService) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *oauthService) handleJWKS(w http.ResponseWriter, _ *http.Request) {
+func (s *Service) HandleJWKS(w http.ResponseWriter, _ *http.Request) {
 	config, ok := s.currentConfig(w)
 	if !ok {
 		return
@@ -348,7 +388,7 @@ func (s *oauthService) handleJWKS(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *oauthService) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 	config, ok := s.currentConfig(w)
 	if !ok {
 		return
@@ -366,6 +406,10 @@ func (s *oauthService) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := query.Get("state")
+	if len(state) > maxStateLength {
+		redirectOAuthAuthorizeError(w, r, redirectURI, "", "invalid_request", "state is too long")
+		return
+	}
 	if !config.enabledGrants[grantAuthorizationCode] {
 		redirectOAuthAuthorizeError(w, r, redirectURI, state, "unsupported_response_type", "authorization_code grant is disabled")
 		return
@@ -408,6 +452,10 @@ func (s *oauthService) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if client.Secret == "" && challenge == "" {
+		redirectOAuthAuthorizeError(w, r, redirectURI, state, "invalid_request", "public clients must use PKCE")
+		return
+	}
 	code, err := randomOpaqueValue()
 	if err != nil {
 		redirectOAuthAuthorizeError(w, r, redirectURI, state, "server_error", err.Error())
@@ -419,6 +467,13 @@ func (s *oauthService) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		redirectOAuthAuthorizeError(w, r, redirectURI, state, "temporarily_unavailable", "OAuth configuration changed")
 		return
 	}
+	now := time.Now()
+	s.pruneExpiredLocked(now)
+	if len(s.codes) >= maxAuthorizationCodes {
+		s.mu.Unlock()
+		redirectOAuthAuthorizeError(w, r, redirectURI, state, "temporarily_unavailable", "too many active authorization codes")
+		return
+	}
 	s.codes[code] = authorizationCode{
 		clientID:    clientID,
 		redirectURI: redirectURI,
@@ -427,7 +482,7 @@ func (s *oauthService) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		nonce:       query.Get("nonce"),
 		challenge:   challenge,
 		method:      method,
-		expiresAt:   time.Now().Add(config.codeTTL),
+		expiresAt:   now.Add(config.codeTTL),
 	}
 	s.mu.Unlock()
 
@@ -445,12 +500,12 @@ func (s *oauthService) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, location.String(), http.StatusFound)
 }
 
-func (s *oauthService) handleToken(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleToken(w http.ResponseWriter, r *http.Request) {
 	config, ok := s.currentConfig(w)
 	if !ok {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxSetupBodySize)
+	r.Body = http.MaxBytesReader(w, r.Body, httpapi.MaxBodySize)
 	if err := r.ParseForm(); err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid form body")
 		return
@@ -514,7 +569,7 @@ func authenticateOAuthClient(
 	return clientID, client, true
 }
 
-func (s *oauthService) exchangeAuthorizationCode(
+func (s *Service) exchangeAuthorizationCode(
 	config *oauthConfig,
 	clientID string,
 	form url.Values,
@@ -527,6 +582,7 @@ func (s *oauthService) exchangeAuthorizationCode(
 		s.mu.Unlock()
 		return nil, newOAuthProtocolError("invalid_grant", "authorization code is invalid or expired")
 	}
+	delete(s.codes, rawCode)
 	if code.clientID != clientID || code.redirectURI != form.Get("redirect_uri") {
 		s.mu.Unlock()
 		return nil, newOAuthProtocolError("invalid_grant", "authorization code does not match this request")
@@ -535,7 +591,6 @@ func (s *oauthService) exchangeAuthorizationCode(
 		s.mu.Unlock()
 		return nil, newOAuthProtocolError("invalid_grant", "PKCE verification failed")
 	}
-	delete(s.codes, rawCode)
 	s.mu.Unlock()
 
 	user := config.users[code.username]
@@ -553,12 +608,15 @@ func (s *oauthService) exchangeAuthorizationCode(
 	)
 }
 
-func (s *oauthService) issueClientCredentials(
+func (s *Service) issueClientCredentials(
 	config *oauthConfig,
 	clientID string,
 	client oauthClientConfig,
 	form url.Values,
 ) (map[string]any, error) {
+	if client.Secret == "" {
+		return nil, newOAuthProtocolError("unauthorized_client", "client_credentials requires a confidential client")
+	}
 	scope, err := validateScope(form.Get("scope"), client.Scopes)
 	if err != nil {
 		return nil, newOAuthProtocolError("invalid_scope", err.Error())
@@ -566,12 +624,15 @@ func (s *oauthService) issueClientCredentials(
 	return s.issueTokens(config, clientID, clientID, scope, nil, nil, "", false, false)
 }
 
-func (s *oauthService) issuePasswordToken(
+func (s *Service) issuePasswordToken(
 	config *oauthConfig,
 	clientID string,
 	client oauthClientConfig,
 	form url.Values,
 ) (map[string]any, error) {
+	if client.Secret == "" {
+		return nil, newOAuthProtocolError("unauthorized_client", "password grant requires a confidential client")
+	}
 	username := form.Get("username")
 	user, ok := config.users[username]
 	if !ok || user.Password == "" || !subtleStringCompare(user.Password, form.Get("password")) {
@@ -594,21 +655,17 @@ func (s *oauthService) issuePasswordToken(
 	)
 }
 
-func (s *oauthService) exchangeRefreshToken(
+func (s *Service) exchangeRefreshToken(
 	config *oauthConfig,
 	clientID string,
 	form url.Values,
 ) (map[string]any, error) {
 	rawToken := form.Get("refresh_token")
-	s.mu.RLock()
+	s.mu.Lock()
+	s.pruneExpiredLocked(time.Now())
 	entry, ok := s.refreshTokens[rawToken]
-	s.mu.RUnlock()
-	if !ok || time.Now().After(entry.expiresAt) || entry.clientID != clientID {
-		if ok && time.Now().After(entry.expiresAt) {
-			s.mu.Lock()
-			delete(s.refreshTokens, rawToken)
-			s.mu.Unlock()
-		}
+	s.mu.Unlock()
+	if !ok || entry.clientID != clientID {
 		return nil, newOAuthProtocolError("invalid_grant", "refresh token is invalid or expired")
 	}
 	scope := entry.scope
@@ -626,7 +683,7 @@ func (s *oauthService) exchangeRefreshToken(
 	return result, err
 }
 
-func (s *oauthService) issueTokens(
+func (s *Service) issueTokens(
 	config *oauthConfig,
 	clientID string,
 	subject string,
@@ -711,6 +768,15 @@ func (s *oauthService) issueTokens(
 				"OAuth configuration changed",
 			)
 		}
+		s.pruneExpiredLocked(now)
+		if len(s.refreshTokens) >= maxRefreshTokens {
+			s.mu.Unlock()
+			return nil, newOAuthProtocolErrorWithStatus(
+				http.StatusServiceUnavailable,
+				"temporarily_unavailable",
+				"too many active refresh tokens",
+			)
+		}
 		s.refreshTokens[refreshToken] = refreshTokenEntry{
 			clientID:  clientID,
 			subject:   subject,
@@ -750,7 +816,7 @@ func signJWT(config *oauthConfig, claims map[string]any) (string, error) {
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
-func (s *oauthService) currentConfig(w http.ResponseWriter) (*oauthConfig, bool) {
+func (s *Service) currentConfig(w http.ResponseWriter) (*oauthConfig, bool) {
 	s.mu.RLock()
 	config := s.config
 	s.mu.RUnlock()
@@ -761,14 +827,14 @@ func (s *oauthService) currentConfig(w http.ResponseWriter) (*oauthConfig, bool)
 	return config, true
 }
 
-func (s *oauthService) isCurrentConfig(config *oauthConfig) bool {
+func (s *Service) isCurrentConfig(config *oauthConfig) bool {
 	s.mu.RLock()
 	current := s.config == config
 	s.mu.RUnlock()
 	return current
 }
 
-func (s *oauthService) writeTokenResponse(
+func (s *Service) writeTokenResponse(
 	w http.ResponseWriter,
 	config *oauthConfig,
 	response map[string]any,
@@ -898,8 +964,19 @@ func contains(values []string, wanted string) bool {
 	return false
 }
 
+func safeRedirectScheme(scheme string) bool {
+	switch strings.ToLower(scheme) {
+	case "", "about", "blob", "data", "file", "javascript", "vbscript":
+		return false
+	default:
+		return true
+	}
+}
+
 func subtleStringCompare(expected, actual string) bool {
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(actual)) == 1
+	expectedHash := sha256.Sum256([]byte(expected))
+	actualHash := sha256.Sum256([]byte(actual))
+	return subtle.ConstantTimeCompare(expectedHash[:], actualHash[:]) == 1
 }
 
 type oauthProtocolError struct {
@@ -936,14 +1013,14 @@ func writeOAuthError(w http.ResponseWriter, status int, code, description string
 	})
 }
 
-func oauthMethodNotAllowed(allowed string) http.HandlerFunc {
+func MethodNotAllowed(allowed string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Allow", allowed)
 		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
 	}
 }
 
-func oauthEndpointNotFound(w http.ResponseWriter, _ *http.Request) {
+func EndpointNotFound(w http.ResponseWriter, _ *http.Request) {
 	writeOAuthError(w, http.StatusNotFound, "invalid_request", "OAuth endpoint not found")
 }
 

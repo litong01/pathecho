@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"crypto"
@@ -18,7 +18,7 @@ import (
 )
 
 func TestOAuthProviderSupportsFourGrantTypes(t *testing.T) {
-	router := newRouter(newMemoryStore())
+	router := NewRouter()
 	setupOAuthProvider(t, router)
 
 	t.Run("discovery and JWKS", func(t *testing.T) {
@@ -51,7 +51,7 @@ func TestOAuthProviderSupportsFourGrantTypes(t *testing.T) {
 
 	t.Run("client credentials", func(t *testing.T) {
 		response := performTokenRequest(router, url.Values{
-			"grant_type":    {grantClientCredentials},
+			"grant_type":    {"client_credentials"},
 			"client_id":     {"test-client"},
 			"client_secret": {"test-secret"},
 			"scope":         {"api.read"},
@@ -67,10 +67,71 @@ func TestOAuthProviderSupportsFourGrantTypes(t *testing.T) {
 		}
 	})
 
+	t.Run("public client protections", func(t *testing.T) {
+		query := url.Values{
+			"response_type": {"code"},
+			"client_id":     {"public-client"},
+			"redirect_uri":  {"http://client.example/public-callback"},
+			"scope":         {"openid"},
+			"state":         {"public-state"},
+		}
+		response := performRequest(router, http.MethodGet, "/oauth/authorize?"+query.Encode(), "")
+		if response.Code != http.StatusFound {
+			t.Fatalf("public authorize status = %d, body = %s", response.Code, response.Body.String())
+		}
+		location, err := url.Parse(response.Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if location.Query().Get("error") != "invalid_request" {
+			t.Fatalf("public client without PKCE redirect = %s", location)
+		}
+
+		query.Set("state", strings.Repeat("s", 1025))
+		response = performRequest(router, http.MethodGet, "/oauth/authorize?"+query.Encode(), "")
+		location, err = url.Parse(response.Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if location.Query().Get("error") != "invalid_request" || location.Query().Get("state") != "" {
+			t.Fatalf("oversized state redirect = %s", location)
+		}
+		query.Set("state", "public-state")
+
+		verifier := "public-client-verifier"
+		challengeHash := sha256.Sum256([]byte(verifier))
+		query.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challengeHash[:]))
+		query.Set("code_challenge_method", "S256")
+		response = performRequest(router, http.MethodGet, "/oauth/authorize?"+query.Encode(), "")
+		location, err = url.Parse(response.Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response = performTokenRequest(router, url.Values{
+			"grant_type":    {"authorization_code"},
+			"client_id":     {"public-client"},
+			"code":          {location.Query().Get("code")},
+			"redirect_uri":  {"http://client.example/public-callback"},
+			"code_verifier": {verifier},
+		}, false)
+		if response.Code != http.StatusOK {
+			t.Fatalf("public client PKCE token status = %d, body = %s", response.Code, response.Body.String())
+		}
+
+		response = performTokenRequest(router, url.Values{
+			"grant_type": {"client_credentials"},
+			"client_id":  {"public-client"},
+		}, false)
+		if response.Code != http.StatusBadRequest ||
+			!strings.Contains(response.Body.String(), `"unauthorized_client"`) {
+			t.Fatalf("public client credentials status = %d, body = %s", response.Code, response.Body.String())
+		}
+	})
+
 	var refreshToken string
 	t.Run("password", func(t *testing.T) {
 		response := performTokenRequest(router, url.Values{
-			"grant_type":    {grantPassword},
+			"grant_type":    {"password"},
 			"client_id":     {"test-client"},
 			"client_secret": {"test-secret"},
 			"username":      {"alice"},
@@ -90,7 +151,7 @@ func TestOAuthProviderSupportsFourGrantTypes(t *testing.T) {
 
 	t.Run("refresh token", func(t *testing.T) {
 		response := performTokenRequest(router, url.Values{
-			"grant_type":    {grantRefreshToken},
+			"grant_type":    {"refresh_token"},
 			"client_id":     {"test-client"},
 			"client_secret": {"test-secret"},
 			"refresh_token": {refreshToken},
@@ -134,7 +195,7 @@ func TestOAuthProviderSupportsFourGrantTypes(t *testing.T) {
 		}
 
 		form := url.Values{
-			"grant_type":    {grantAuthorizationCode},
+			"grant_type":    {"authorization_code"},
 			"code":          {code},
 			"redirect_uri":  {"http://client.example/callback"},
 			"code_verifier": {verifier},
@@ -170,11 +231,36 @@ func TestOAuthProviderSupportsFourGrantTypes(t *testing.T) {
 			errorLocation.Query().Get("state") != "error-state" {
 			t.Fatalf("invalid authorize error redirect: %s", errorLocation)
 		}
+
+		query.Set("scope", "openid")
+		query.Set("state", "pkce-state")
+		response = performRequest(router, http.MethodGet, "/oauth/authorize?"+query.Encode(), "")
+		location, err = url.Parse(response.Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		secondCode := location.Query().Get("code")
+		badForm := url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {secondCode},
+			"redirect_uri":  {"http://client.example/callback"},
+			"code_verifier": {"wrong-verifier"},
+		}
+		response = performTokenRequest(router, badForm, true)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("bad PKCE status = %d, body = %s", response.Code, response.Body.String())
+		}
+		badForm.Set("code_verifier", verifier)
+		response = performTokenRequest(router, badForm, true)
+		if response.Code != http.StatusBadRequest ||
+			!strings.Contains(response.Body.String(), `"invalid_grant"`) {
+			t.Fatalf("code survived failed PKCE status = %d, body = %s", response.Code, response.Body.String())
+		}
 	})
 }
 
 func TestOAuthSetupResetAndErrors(t *testing.T) {
-	router := newRouter(newMemoryStore())
+	router := NewRouter()
 
 	response := performRequest(router, http.MethodGet, "/oauth/jwks", "")
 	if response.Code != http.StatusServiceUnavailable ||
@@ -215,6 +301,17 @@ func TestOAuthSetupResetAndErrors(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("fragment redirect setup status = %d, body = %s", response.Code, response.Body.String())
 	}
+	response = performJSONRequest(t, router, http.MethodPost, "/oauth?DO=setup", map[string]any{
+		"issuer": "http://issuer.example/oauth",
+		"clients": map[string]any{
+			"client": map[string]any{
+				"redirectURIs": []string{"javascript:alert(1)"},
+			},
+		},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe redirect setup status = %d, body = %s", response.Code, response.Body.String())
+	}
 
 	setupOAuthProvider(t, router)
 	response = performTokenRequest(router, url.Values{
@@ -247,7 +344,7 @@ func TestOAuthSetupAcceptsImportedRSAKeyAndClientShorthand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	router := newRouter(newMemoryStore())
+	router := NewRouter()
 	response := performJSONRequest(t, router, http.MethodPost, "/oauth?DO=setup", map[string]any{
 		"issuer":        "http://issuer.example/oauth",
 		"privateKeyPEM": string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedKey})),
@@ -264,7 +361,7 @@ func TestOAuthSetupAcceptsImportedRSAKeyAndClientShorthand(t *testing.T) {
 	}
 
 	response = performTokenRequest(router, url.Values{
-		"grant_type":    {grantClientCredentials},
+		"grant_type":    {"client_credentials"},
 		"client_id":     {"test-client"},
 		"client_secret": {"test-secret"},
 		"scope":         {"api.read"},
@@ -290,6 +387,10 @@ func setupOAuthProvider(t *testing.T, router http.Handler) {
 				"secret":       "test-secret",
 				"redirectURIs": []string{"http://client.example/callback"},
 				"scopes":       []string{"openid", "profile", "api.read"},
+			},
+			"public-client": map[string]any{
+				"redirectURIs": []string{"http://client.example/public-callback"},
+				"scopes":       []string{"openid"},
 			},
 		},
 		"users": map[string]any{
