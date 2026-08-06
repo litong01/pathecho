@@ -17,7 +17,7 @@ env:
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   test:
-    name: Test
+    name: Unit Test
     runs-on: ubuntu-22.04
 
     steps:
@@ -117,7 +117,7 @@ jobs:
         if-no-files-found: ignore
 
   e2e:
-    name: E2E
+    name: E2E Test
     needs: test
     runs-on: ubuntu-22.04
 
@@ -140,7 +140,7 @@ jobs:
       run: go test -tags=e2e ./e2e/ -count=1 -v
 
   dockerhub:
-    name: Docker
+    name: Build image and push to Dockerhub
     needs: [test, e2e]
     runs-on: ubuntu-22.04
 
