@@ -12,6 +12,7 @@ stub responses with Go templates, hit limits, and reset controls.
 - `internal/stub`: configurable stub response engine
 - `internal/oauth`: in-memory OAuth/OIDC test provider
 - `internal/httpapi`: shared HTTP control and JSON helpers
+- `e2e`: container-backed end-to-end tests that also double as usage examples
 
 ## Configure stub responses
 
@@ -283,6 +284,8 @@ docker build -t email4tong/pathecho .
 
 # Run the tests
 
+Unit tests (no Docker required):
+
 ```shell
 go test ./...
 ```
@@ -292,6 +295,28 @@ Run with the race detector and vet:
 ```shell
 go test -race ./...
 go vet ./...
+```
+
+## End-to-end tests
+
+The `e2e` package builds the Docker image, starts a container, then exercises
+the same flows documented above (stub setup/templates/resets and the OAuth
+provider grants). Comments in the test files include the equivalent `curl`
+examples.
+
+Requires Docker. The suite builds `pathecho-e2e:local` unless you point it at
+an existing image:
+
+```shell
+go test -tags=e2e ./e2e/ -count=1 -v
+```
+
+Reuse an already-built image:
+
+```shell
+docker build -t email4tong/pathecho:local .
+PATHECHO_E2E_IMAGE=email4tong/pathecho:local PATHECHO_E2E_SKIP_BUILD=1 \
+  go test -tags=e2e ./e2e/ -count=1 -v
 ```
 
 ## Unit test coverage

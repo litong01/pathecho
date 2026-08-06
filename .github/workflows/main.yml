@@ -110,9 +110,32 @@ jobs:
           coverage-table.md
         if-no-files-found: ignore
 
+  e2e:
+    name: E2E
+    needs: test
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+
+    - name: Build container image
+      run: docker build -t pathecho-e2e:ci .
+
+    - name: Run container e2e suite
+      env:
+        PATHECHO_E2E_IMAGE: pathecho-e2e:ci
+        PATHECHO_E2E_SKIP_BUILD: "1"
+      run: go test -tags=e2e ./e2e/ -count=1 -v
+
   dockerhub:
     name: Docker
-    needs: test
+    needs: [test, e2e]
     runs-on: ubuntu-22.04
 
     steps:
