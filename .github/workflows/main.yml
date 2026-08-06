@@ -22,10 +22,10 @@ jobs:
 
     steps:
     - name: Checkout sources
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: go.mod
 
@@ -101,7 +101,7 @@ jobs:
 
     - name: Upload coverage profile
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: coverage
         path: |
@@ -117,10 +117,10 @@ jobs:
 
     steps:
     - name: Checkout sources
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: go.mod
 
@@ -143,7 +143,7 @@ jobs:
       run: docker version
 
     - name: Checkout sources
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Build pathecho container image locally
       run: docker build -t email4tong/pathecho:${{ env.IMAGE_TAG }} .
