@@ -19,6 +19,7 @@ import (
 )
 
 const (
+	maxLoggedBodySize  = 4 << 10
 	maxRenderedSize    = 1 << 20 // 1 MiB
 	maxStoredResponses = 1024
 	unlimitedHits      = -1
@@ -234,12 +235,45 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	httpapi.WriteJSON(w, status, value)
 }
 
+func logControlRequest(r *http.Request, control string, content any) {
+	logger := goslog.Default()
+	if content == nil {
+		logger.Info(r.Method, "path", r.RequestURI, "control", control)
+		return
+	}
+
+	data, err := json.Marshal(content)
+	if err != nil {
+		logger.Info(r.Method, "path", r.RequestURI, "control", control, "content", fmt.Sprint(content))
+		return
+	}
+	if len(data) > maxLoggedBodySize {
+		logger.Info(
+			r.Method,
+			"path", r.RequestURI,
+			"control", control,
+			"content", string(data[:maxLoggedBodySize]),
+			"truncated", true,
+		)
+		return
+	}
+
+	var jsonData any
+	if json.Unmarshal(data, &jsonData) == nil {
+		logger.Info(r.Method, "path", r.RequestURI, "control", control, "content", jsonData)
+		return
+	}
+	logger.Info(r.Method, "path", r.RequestURI, "control", control, "content", string(data))
+}
+
 func (s *Service) HandleSetup(w http.ResponseWriter, r *http.Request) {
 	var request setupRequest
 	if err := decodeJSONBody(w, r, &request, false); err != nil {
+		logControlRequest(r, "setup", nil)
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
+	logControlRequest(r, "setup", request)
 
 	method := strings.ToUpper(strings.TrimSpace(request.Method))
 	if !supportedMethod(method) {
@@ -311,9 +345,11 @@ func (s *Service) HandleSetup(w http.ResponseWriter, r *http.Request) {
 func (s *Service) HandlePathReset(w http.ResponseWriter, r *http.Request) {
 	var request resetRequest
 	if err := decodeJSONBody(w, r, &request, true); err != nil {
+		logControlRequest(r, "reset", nil)
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
+	logControlRequest(r, "reset", request)
 
 	method := strings.ToUpper(strings.TrimSpace(request.Method))
 	if method != "" && !supportedMethod(method) {
@@ -330,6 +366,8 @@ func (s *Service) HandlePathReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) HandleGlobalReset(w http.ResponseWriter, r *http.Request) {
+	logControlRequest(r, "reset-all", nil)
+
 	httpapi.DrainBody(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "Reset",

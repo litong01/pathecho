@@ -1,6 +1,7 @@
 package stub
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,7 +9,123 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	goslog "golang.org/x/exp/slog"
 )
+
+func captureLogRecord(t *testing.T, run func()) map[string]any {
+	t.Helper()
+
+	var output bytes.Buffer
+	previous := goslog.Default()
+	goslog.SetDefault(goslog.New(goslog.NewJSONHandler(&output, nil)))
+	defer goslog.SetDefault(previous)
+
+	run()
+
+	var record map[string]any
+	if err := json.NewDecoder(&output).Decode(&record); err != nil {
+		t.Fatalf("decode log record: %v; output = %q", err, output.String())
+	}
+	return record
+}
+
+func TestControlRequestLogging(t *testing.T) {
+	service := NewService()
+
+	t.Run("setup includes decoded body", func(t *testing.T) {
+		record := captureLogRecord(t, func() {
+			recorder := httptest.NewRecorder()
+			request := jsonRequest(http.MethodPost, "/users?DO=setup", map[string]any{
+				"method": http.MethodGet,
+				"response": map[string]any{
+					"status": http.StatusCreated,
+					"body":   "created",
+				},
+			})
+			service.HandleSetup(recorder, request)
+			if recorder.Code != http.StatusCreated {
+				t.Fatalf("setup status = %d body = %s", recorder.Code, recorder.Body.String())
+			}
+		})
+
+		if record["msg"] != http.MethodPost || record["path"] != "/users?DO=setup" || record["control"] != "setup" {
+			t.Fatalf("setup log metadata = %#v", record)
+		}
+		content, ok := record["content"].(map[string]any)
+		if !ok || content["method"] != http.MethodGet {
+			t.Fatalf("setup log content = %#v", record["content"])
+		}
+	})
+
+	t.Run("path reset includes decoded body", func(t *testing.T) {
+		record := captureLogRecord(t, func() {
+			recorder := httptest.NewRecorder()
+			request := jsonRequest(http.MethodPost, "/users?DO=reset", map[string]any{"method": http.MethodGet})
+			service.HandlePathReset(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("reset status = %d body = %s", recorder.Code, recorder.Body.String())
+			}
+		})
+
+		content, ok := record["content"].(map[string]any)
+		if record["control"] != "reset" || !ok || content["method"] != http.MethodGet {
+			t.Fatalf("reset log = %#v", record)
+		}
+	})
+
+	t.Run("invalid JSON logs metadata only", func(t *testing.T) {
+		record := captureLogRecord(t, func() {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/invalid?DO=setup", strings.NewReader(`{`))
+			service.HandleSetup(recorder, request)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("invalid setup status = %d", recorder.Code)
+			}
+		})
+
+		if record["control"] != "setup" || record["path"] != "/invalid?DO=setup" {
+			t.Fatalf("invalid setup log metadata = %#v", record)
+		}
+		if _, exists := record["content"]; exists {
+			t.Fatalf("invalid setup unexpectedly logged content: %#v", record)
+		}
+	})
+
+	t.Run("large body is truncated", func(t *testing.T) {
+		record := captureLogRecord(t, func() {
+			recorder := httptest.NewRecorder()
+			request := jsonRequest(http.MethodPost, "/large?DO=setup", map[string]any{
+				"method":   http.MethodGet,
+				"response": map[string]any{"body": strings.Repeat("x", maxLoggedBodySize)},
+			})
+			service.HandleSetup(recorder, request)
+			if recorder.Code != http.StatusCreated {
+				t.Fatalf("large setup status = %d body = %s", recorder.Code, recorder.Body.String())
+			}
+		})
+
+		content, ok := record["content"].(string)
+		if record["truncated"] != true || !ok || len(content) != maxLoggedBodySize {
+			t.Fatalf("truncated setup log = %#v", record)
+		}
+	})
+
+	t.Run("global reset logs control metadata", func(t *testing.T) {
+		record := captureLogRecord(t, func() {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/RESET", nil)
+			service.HandleGlobalReset(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("global reset status = %d", recorder.Code)
+			}
+		})
+
+		if record["control"] != "reset-all" || record["path"] != "/RESET" {
+			t.Fatalf("global reset log = %#v", record)
+		}
+	})
+}
 
 func TestServiceSetupServeResetAndValidation(t *testing.T) {
 	service := NewService()
