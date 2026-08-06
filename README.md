@@ -281,8 +281,54 @@ docker run -dit -p 9095:8080 --rm email4tong/pathecho
 docker build -t email4tong/pathecho .
 ```
 
-# Run the test
+# Run the tests
 
-```
+```shell
 go test ./...
+```
+
+Run with the race detector and vet:
+
+```shell
+go test -race ./...
+go vet ./...
+```
+
+## Unit test coverage
+
+Statement coverage per package (measured across the full suite with
+`-coverpkg=./...`, so integration tests in `internal/server` count toward the
+packages they exercise):
+
+| Package | Coverage |
+| --- | --- |
+| `internal/httpapi` | 86.2% |
+| `internal/oauth` | 79.8% |
+| `internal/server` | 78.4% |
+| `internal/stub` | 63.4% |
+| `cmd/pathecho` | 3.3% |
+| **Total** | **71.8%** |
+
+`cmd/pathecho` is mostly process startup and TLS wiring, so it is intentionally
+thin on unit coverage.
+
+Reproduce the total and a per-function breakdown:
+
+```shell
+go test -coverpkg=./... -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out
+```
+
+Measure a single package (the suite still runs, but only that package's
+statements are counted):
+
+```shell
+go test -coverpkg=./internal/oauth ./... -coverprofile=oauth.out
+go tool cover -func=oauth.out | tail -1
+```
+
+View coverage highlighted in your browser:
+
+```shell
+go tool cover -html=coverage.out
 ```
