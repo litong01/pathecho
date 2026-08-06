@@ -31,7 +31,21 @@ func configureLogger() *goslog.Logger {
 	return logger
 }
 
+var (
+	listenAndServe = func(server *http.Server) error {
+		return server.ListenAndServe()
+	}
+	listenAndServeTLS = func(server *http.Server, certFile, keyFile string) error {
+		return server.ListenAndServeTLS(certFile, keyFile)
+	}
+	osExit = os.Exit
+)
+
 func main() {
+	osExit(run())
+}
+
+func run() int {
 	logger := configureLogger()
 	router := server.NewRouter()
 
@@ -45,7 +59,7 @@ func main() {
 	key := os.Getenv("TLS_KEY")
 	if (cert == "") != (key == "") {
 		logger.Error("TLS_CERT and TLS_KEY must be configured together")
-		os.Exit(1)
+		return 1
 	}
 	httpServer := newHTTPServer(address, router)
 	var err error
@@ -84,13 +98,14 @@ func main() {
 			},
 		}
 		httpServer.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
-		err = httpServer.ListenAndServeTLS(cert, key)
+		err = listenAndServeTLS(httpServer, cert, key)
 	} else {
 		logger.Info("TLS disabled")
-		err = httpServer.ListenAndServe()
+		err = listenAndServe(httpServer)
 	}
 	if err != nil {
 		logger.Error(err.Error())
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
