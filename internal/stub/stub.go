@@ -37,6 +37,7 @@ type responseEntry struct {
 	HeaderTemplates map[string]*template.Template
 	BodyTemplate    *template.Template // set when response.body is a JSON string
 	BodyJSON        json.RawMessage    // set when response.body is a JSON object/array
+	Delay           *responseDelay     // optional; compiled from setup "delays"
 	Remaining       int
 	InFlight        int
 }
@@ -146,9 +147,10 @@ func (s *memoryStore) ResetAll() int {
 }
 
 type setupRequest struct {
-	Method   string        `json:"method"`
-	Times    *int          `json:"times,omitempty"`
-	Response setupResponse `json:"response"`
+	Method   string          `json:"method"`
+	Times    *int            `json:"times,omitempty"`
+	Delays   json.RawMessage `json:"delays,omitempty"`
+	Response setupResponse   `json:"response"`
 }
 
 type setupResponse struct {
@@ -322,11 +324,17 @@ func (s *Service) HandleSetup(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
+	delay, err := parseResponseDelay(request.Delays)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
 	entry := &responseEntry{
 		Status:          status,
 		HeaderTemplates: headerTemplates,
 		BodyTemplate:    bodyTemplate,
 		BodyJSON:        bodyJSON,
+		Delay:           delay,
 		Remaining:       remaining,
 	}
 	if err := s.store.Set(method, r.URL.Path, entry); err != nil {
@@ -384,6 +392,10 @@ func (s *Service) ServeConfigured(w http.ResponseWriter, r *http.Request) bool {
 	defer func() {
 		s.store.Complete(r.Method, r.URL.Path, entry, success)
 	}()
+
+	if err := applyResponseDelay(r.Context(), entry.Delay); err != nil {
+		return true
+	}
 
 	query := r.URL.Query()
 	headers := r.Header.Clone()

@@ -3,7 +3,7 @@
 HTTP stub server for testing. By default it answers any path with
 method-appropriate responses (GET echoes the request URI; POST/PUT/DELETE
 return standard success codes). You can also configure per-path, per-method
-stub responses with Go templates, hit limits, and reset controls.
+stub responses with Go templates, hit limits, response delays, and reset controls.
 
 ## Project layout
 
@@ -76,6 +76,17 @@ requests receive the response. When omitted, the setup remains until it is
 overwritten or reset. Setups are held in memory and are lost when the process
 restarts. The server stores at most 1,024 configured responses; setup request
 bodies and rendered response bodies/headers are limited to 1 MiB.
+
+`delays` in the setup JSON waits before returning a matched response, useful for
+mimicking slow dependencies. Values are milliseconds:
+
+- number or digit string: fixed wait (`150` or `"150"`)
+- `R<max>`: uniform random wait in `[0, max]` (`"R50"`)
+- `R<min>-<max>`: uniform random wait in `[min, max]` (`"R20-80"`)
+- array of the above: cycle one entry per hit (`["5", 10, "R20-80"]`)
+
+Omit `delays`, or use `0` / `"0"`, for no wait. Each value must be an integer
+from 0 through 30000 (30 seconds).
 
 String values in `response.body` and response header values are rendered as Go
 `text/template` templates. Status is fixed at setup time. The template receives:
