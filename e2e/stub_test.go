@@ -133,7 +133,7 @@ func TestStubJSONPathRequestBody(t *testing.T) {
 			"body": map[string]any{
 				"name": `{{jsonPath "$.user.name" .J}}`,
 				"age":  `{{jsonPath "$.user.age" .J}}`,
-				"raw":  "{{.Body}}",
+				"raw":  "{{jsonString .Body}}",
 			},
 		},
 	})
@@ -151,6 +151,70 @@ func TestStubJSONPathRequestBody(t *testing.T) {
 	decodeJSON(t, resp.Body, &result)
 	if result.Name != "Sam" || result.Age != 30 || result.Raw != `{"user":{"name":"Sam","age":30}}` {
 		t.Fatalf("unexpected rendered body: %+v", result)
+	}
+}
+
+/*
+Example: a bare {{.Body}} in a JSON object body is re-parsed as JSON, so a
+JSON request payload is embedded as an object rather than a string.
+*/
+func TestStubRawBodyEmbeddedAsJSON(t *testing.T) {
+	resetServer(t)
+
+	setup := doJSON(t, http.MethodPost, "/echo?DO=setup", map[string]any{
+		"method": "POST",
+		"response": map[string]any{
+			"status": 200,
+			"headers": map[string]string{
+				"Content-Type": "application/json",
+			},
+			"body": map[string]any{
+				"received": "{{.Body}}",
+			},
+		},
+	})
+	mustStatus(t, setup, http.StatusCreated)
+
+	resp := doRequest(t, http.MethodPost, "/echo", "application/json",
+		[]byte(`{"user":{"name":"Sam","age":30}}`))
+	mustStatus(t, resp, http.StatusOK)
+
+	var result struct {
+		Received struct {
+			User struct {
+				Name string  `json:"name"`
+				Age  float64 `json:"age"`
+			} `json:"user"`
+		} `json:"received"`
+	}
+	decodeJSON(t, resp.Body, &result)
+	if result.Received.User.Name != "Sam" || result.Received.User.Age != 30 {
+		t.Fatalf("unexpected rendered body: %+v", result)
+	}
+}
+
+/*
+Example: a non-JSON request body is available as raw text through .Body.
+*/
+func TestStubNonJSONRequestBody(t *testing.T) {
+	resetServer(t)
+
+	setup := doJSON(t, http.MethodPost, "/plain?DO=setup", map[string]any{
+		"method": "POST",
+		"response": map[string]any{
+			"status": 200,
+			"headers": map[string]string{
+				"Content-Type": "text/plain",
+			},
+			"body": "got={{.Body}}",
+		},
+	})
+	mustStatus(t, setup, http.StatusCreated)
+
+	resp := doRequest(t, http.MethodPost, "/plain", "text/plain", []byte("hello there"))
+	mustStatus(t, resp, http.StatusOK)
+	if strings.TrimSpace(resp.Body) != "got=hello there" {
+		t.Fatalf("plain body = %q", resp.Body)
 	}
 }
 

@@ -68,7 +68,7 @@ curl -X POST 'http://localhost:9095/users?DO=setup' \
       "body": {
         "name": "{{jsonPath \"$.user.name\" .J}}",
         "age": "{{jsonPath \"$.user.age\" .J}}",
-        "raw": "{{.Body}}"
+        "raw": "{{jsonString .Body}}"
       }
     }
   }'
@@ -77,6 +77,10 @@ curl -X POST 'http://localhost:9095/users' \
   -H 'Content-Type: application/json' \
   -d '{"user":{"name":"Sam","age":30}}'
 ```
+
+A bare `"{{.Body}}"` follows the same rule as any other rendered string: a JSON
+request payload is inserted as a JSON object or array. Wrap it with
+`jsonString` when you want the payload echoed back as a string instead.
 
 Response header values use the same templates. For example, configure a
 dynamic redirect:
