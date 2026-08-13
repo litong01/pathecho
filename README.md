@@ -394,23 +394,10 @@ PATHECHO_E2E_IMAGE=email4tong/pathecho:local PATHECHO_E2E_SKIP_BUILD=1 \
 
 ## Unit test coverage
 
-Statement coverage per package (measured across the full suite with
-`-coverpkg=./...`, so integration tests in `internal/server` count toward the
-packages they exercise):
+Measure statement coverage across the full suite with `-coverpkg=./...`, so
+integration tests in `internal/server` count toward the packages they exercise.
 
-| Package | Coverage |
-| --- | --- |
-| `internal/httpapi` | 86.2% |
-| `internal/oauth` | 79.8% |
-| `internal/server` | 78.4% |
-| `internal/stub` | 63.4% |
-| `cmd/pathecho` | 3.3% |
-| **Total** | **71.8%** |
-
-`cmd/pathecho` is mostly process startup and TLS wiring, so it is intentionally
-thin on unit coverage.
-
-Reproduce the total and a per-function breakdown:
+Produce the total and a per-function breakdown:
 
 ```shell
 go test -coverpkg=./... -coverprofile=coverage.out ./...
