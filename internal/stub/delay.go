@@ -70,6 +70,16 @@ func applyResponseDelay(ctx context.Context, delay *responseDelay) error {
 	return delaySleep(ctx, delay.next())
 }
 
+// clone returns a delay that reuses the immutable expression list but restarts
+// the per-hit cycle. It lets a compiled delay be reused across freshly applied
+// deferred setups without sharing cycle position.
+func (d *responseDelay) clone() *responseDelay {
+	if d == nil {
+		return nil
+	}
+	return &responseDelay{exprs: d.exprs}
+}
+
 func (d *responseDelay) next() time.Duration {
 	d.mu.Lock()
 	expr := d.exprs[d.index%len(d.exprs)]

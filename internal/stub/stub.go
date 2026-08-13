@@ -20,10 +20,12 @@ import (
 )
 
 const (
-	maxLoggedBodySize  = 4 << 10
-	maxRenderedSize    = 1 << 20 // 1 MiB
-	maxStoredResponses = 1024
-	unlimitedHits      = -1
+	maxLoggedBodySize    = 4 << 10
+	maxRenderedSize      = 1 << 20 // 1 MiB
+	maxStoredResponses   = 1024
+	maxStoredDefinitions = 1024
+	maxSetupNameLength   = 128
+	unlimitedHits        = -1
 )
 
 var errRenderedTooLarge = errors.New("rendered response exceeds maximum size")
@@ -41,6 +43,36 @@ type responseEntry struct {
 	Delay           *responseDelay     // optional; compiled from setup "delays"
 	Remaining       int
 	InFlight        int
+	// Then names setup definitions applied when this entry is served. They act
+	// like DO=setup calls that only run once the associated request arrives,
+	// which matters when an application makes many dependency requests before
+	// the follow-up response is needed. Names are resolved at serve time.
+	Then []string
+}
+
+// setupDefinition is a compiled, named setup awaiting application. Definitions
+// are registered by a DO=setup carrying a name and are applied by name from the
+// "then" list of a served response.
+type setupDefinition struct {
+	Name   string
+	Method string
+	Path   string
+	Proto  *responseEntry // template copied fresh on each application
+}
+
+// freshCopy returns an independent entry that reuses the immutable compiled
+// templates but resets per-serve state (InFlight) and clones the delay so its
+// cycle position is not shared across applications.
+func (e *responseEntry) freshCopy() *responseEntry {
+	return &responseEntry{
+		Status:          e.Status,
+		HeaderTemplates: e.HeaderTemplates,
+		BodyTemplate:    e.BodyTemplate,
+		BodyJSON:        e.BodyJSON,
+		Delay:           e.Delay.clone(),
+		Remaining:       e.Remaining,
+		Then:            e.Then,
+	}
 }
 
 type responseMatch struct {
@@ -209,11 +241,81 @@ func (s *memoryStore) ResetAll() int {
 	return removed
 }
 
+// definitionStore holds named setups awaiting application. It is kept separate
+// from responseStore so active responses and pending definitions can be backed
+// independently.
+type definitionStore interface {
+	Define(definition *setupDefinition) error
+	Lookup(name string) (*setupDefinition, bool)
+	Reset(method, path string) int
+	ResetAll() int
+}
+
+type memoryDefinitionStore struct {
+	mu          sync.Mutex
+	definitions map[string]*setupDefinition
+}
+
+func newMemoryDefinitionStore() *memoryDefinitionStore {
+	return &memoryDefinitionStore{definitions: make(map[string]*setupDefinition)}
+}
+
+func (s *memoryDefinitionStore) Define(definition *setupDefinition) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, exists := s.definitions[definition.Name]
+	if !exists && len(s.definitions) >= maxStoredDefinitions {
+		return fmt.Errorf("setup definition limit of %d entries reached", maxStoredDefinitions)
+	}
+	s.definitions[definition.Name] = definition
+	return nil
+}
+
+func (s *memoryDefinitionStore) Lookup(name string) (*setupDefinition, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	definition, ok := s.definitions[name]
+	return definition, ok
+}
+
+// Reset removes definitions registered on path, optionally narrowed to one
+// method, so resetting a path also clears what was defined there.
+func (s *memoryDefinitionStore) Reset(method, path string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	removed := 0
+	for name, definition := range s.definitions {
+		if definition.Path != path {
+			continue
+		}
+		if method != "" && definition.Method != method {
+			continue
+		}
+		delete(s.definitions, name)
+		removed++
+	}
+	return removed
+}
+
+func (s *memoryDefinitionStore) ResetAll() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := len(s.definitions)
+	s.definitions = make(map[string]*setupDefinition)
+	return removed
+}
+
 type setupRequest struct {
-	Method   string          `json:"method"`
+	Method string `json:"method"`
+	// Name registers this setup as a definition that "then" lists can apply
+	// later. It may also be supplied as the DONAME query parameter.
+	Name     string          `json:"name,omitempty"`
 	Times    *int            `json:"times,omitempty"`
 	Delays   json.RawMessage `json:"delays,omitempty"`
 	Response setupResponse   `json:"response"`
+	// Then names the setup definitions to apply when this response is served.
+	Then []string `json:"then,omitempty"`
 }
 
 type setupResponse struct {
@@ -284,12 +386,17 @@ func firstValues(values map[string][]string) map[string]string {
 }
 
 type Service struct {
-	store responseStore
-	funcs template.FuncMap
+	store       responseStore
+	definitions definitionStore
+	funcs       template.FuncMap
 }
 
 func NewService() *Service {
-	return &Service{store: newMemoryStore(), funcs: templateFunctions()}
+	return &Service{
+		store:       newMemoryStore(),
+		definitions: newMemoryDefinitionStore(),
+		funcs:       templateFunctions(),
+	}
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any, allowEmpty bool) error {
@@ -335,6 +442,9 @@ func logControlRequest(r *http.Request, control string, content any) {
 	logger.Info(r.Method, "path", r.RequestURI, "control", control, "content", string(data))
 }
 
+// HandleSetup activates an unnamed response immediately. A named setup is saved
+// as a definition instead and becomes active only when a served response names
+// it in "then".
 func (s *Service) HandleSetup(w http.ResponseWriter, r *http.Request) {
 	var request setupRequest
 	if err := decodeJSONBody(w, r, &request, false); err != nil {
@@ -350,71 +460,204 @@ func (s *Service) HandleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status := request.Response.Status
-	if status == 0 {
-		status = http.StatusOK
+	name, err := resolveSetupName(r, request)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
 	}
-	if status < 200 || status > 599 {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("response status must be between 200 and 599"))
+	remaining, err := resolveRemaining(r, request)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
 
+	entry, err := compileEntry(method+" "+r.URL.Path, request, remaining, s.funcs)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	if name == "" {
+		if err := s.store.Set(method, r.URL.Path, entry.freshCopy()); err != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, err)
+			return
+		}
+	} else {
+		definition := &setupDefinition{
+			Name:   name,
+			Method: method,
+			Path:   r.URL.Path,
+			Proto:  entry,
+		}
+		if err := s.definitions.Define(definition); err != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, err)
+			return
+		}
+	}
+
+	response := map[string]any{
+		"status": "Setup",
+		"method": method,
+		"path":   r.URL.Path,
+		"times":  remainingValue(remaining),
+	}
+	if name != "" {
+		response["status"] = "Saved"
+		response["name"] = name
+	}
+	if len(entry.Then) > 0 {
+		response["then"] = entry.Then
+	}
+	writeJSON(w, http.StatusCreated, response)
+}
+
+// resolveSetupName reads the setup name from the body or the DONAME query
+// parameter. An empty name means the setup is not registered as a definition.
+func resolveSetupName(r *http.Request, request setupRequest) (string, error) {
+	name := strings.TrimSpace(request.Name)
+	if rawName, ok := queryValueFold(r, "DONAME"); ok {
+		if name != "" {
+			return "", fmt.Errorf("specify only one of name or DONAME")
+		}
+		name = strings.TrimSpace(rawName)
+	}
+	if name == "" {
+		return "", nil
+	}
+	if err := validateSetupName(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func validateSetupName(name string) error {
+	if len(name) > maxSetupNameLength {
+		return fmt.Errorf("name must be at most %d characters", maxSetupNameLength)
+	}
+	for _, character := range name {
+		if character < 0x20 || character == 0x7f {
+			return fmt.Errorf("name must not contain control characters")
+		}
+	}
+	return nil
+}
+
+// resolveRemaining resolves the allowed hit count from the body "times" field
+// or the DOTIME query parameter.
+func resolveRemaining(r *http.Request, request setupRequest) (int, error) {
 	remaining := unlimitedHits
 	if request.Times != nil {
 		remaining = *request.Times
 	}
 	if rawTimes, ok := queryValueFold(r, "DOTIME"); ok {
 		if request.Times != nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("specify only one of times or DOTIME"))
-			return
+			return 0, fmt.Errorf("specify only one of times or DOTIME")
 		}
 		value, err := strconv.Atoi(rawTimes)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("DOTIME must be a positive integer"))
-			return
+			return 0, fmt.Errorf("DOTIME must be a positive integer")
 		}
 		remaining = value
 	}
 	if remaining != unlimitedHits && remaining <= 0 {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("times must be a positive integer"))
-		return
+		return 0, fmt.Errorf("times must be a positive integer")
+	}
+	return remaining, nil
+}
+
+// compileEntry validates and compiles a setup spec into a responseEntry.
+// remaining is the resolved hit count for this entry.
+func compileEntry(name string, spec setupRequest, remaining int, funcs template.FuncMap) (*responseEntry, error) {
+	status := spec.Response.Status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if status < 200 || status > 599 {
+		return nil, fmt.Errorf("response status must be between 200 and 599")
 	}
 
-	bodyTemplate, bodyJSON, err := compileResponseBody(method+" "+r.URL.Path, request.Response.Body, s.funcs)
+	bodyTemplate, bodyJSON, err := compileResponseBody(name, spec.Response.Body, funcs)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err)
-		return
+		return nil, err
 	}
-
-	headerTemplates, err := compileResponseHeaders(method+" "+r.URL.Path, request.Response.Headers, s.funcs)
+	headerTemplates, err := compileResponseHeaders(name, spec.Response.Headers, funcs)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err)
-		return
+		return nil, err
 	}
-	delay, err := parseResponseDelay(request.Delays)
+	delay, err := parseResponseDelay(spec.Delays)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err)
-		return
+		return nil, err
 	}
-	entry := &responseEntry{
+	thenNames, err := normalizeThenNames(spec.Then)
+	if err != nil {
+		return nil, err
+	}
+	return &responseEntry{
 		Status:          status,
 		HeaderTemplates: headerTemplates,
 		BodyTemplate:    bodyTemplate,
 		BodyJSON:        bodyJSON,
 		Delay:           delay,
 		Remaining:       remaining,
-	}
-	if err := s.store.Set(method, r.URL.Path, entry); err != nil {
-		writeJSONError(w, http.StatusServiceUnavailable, err)
-		return
-	}
+		Then:            thenNames,
+	}, nil
+}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"status": "Setup",
-		"method": method,
-		"path":   r.URL.Path,
-		"times":  remainingValue(remaining),
-	})
+// normalizeThenNames trims and validates the "then" names. Names are resolved
+// when the response is served, so a definition may be registered before or
+// after the setup that references it.
+func normalizeThenNames(names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	normalized := make([]string, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for index, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, fmt.Errorf("then[%d]: name must not be empty", index)
+		}
+		if err := validateSetupName(name); err != nil {
+			return nil, fmt.Errorf("then[%d]: %w", index, err)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("then[%d]: duplicate name %q", index, name)
+		}
+		seen[name] = true
+		normalized = append(normalized, name)
+	}
+	return normalized, nil
+}
+
+// applyThenSetups looks up each named definition and activates it. It runs
+// after the triggering response is committed, so a missing name or a full store
+// is logged rather than surfaced to the triggering caller.
+func (s *Service) applyThenSetups(r *http.Request, names []string) {
+	trigger := r.Method + " " + r.URL.Path
+	logger := goslog.Default()
+	for _, name := range names {
+		definition, ok := s.definitions.Lookup(name)
+		if !ok {
+			logger.Warn("deferred setup not found", "trigger", trigger, "name", name)
+			continue
+		}
+		if err := s.store.Set(definition.Method, definition.Path, definition.Proto.freshCopy()); err != nil {
+			logger.Warn("deferred setup failed",
+				"trigger", trigger,
+				"name", name,
+				"method", definition.Method,
+				"path", definition.Path,
+				"error", err.Error(),
+			)
+			continue
+		}
+		logger.Info("deferred setup applied",
+			"trigger", trigger,
+			"name", name,
+			"method", definition.Method,
+			"path", definition.Path,
+		)
+	}
 }
 
 func (s *Service) HandlePathReset(w http.ResponseWriter, r *http.Request) {
@@ -431,12 +674,12 @@ func (s *Service) HandlePathReset(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("method must be GET, POST, PUT, or DELETE"))
 		return
 	}
-	removed := s.store.Reset(method, r.URL.Path)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":  "Reset",
-		"method":  method,
-		"path":    r.URL.Path,
-		"removed": removed,
+		"status":             "Reset",
+		"method":             method,
+		"path":               r.URL.Path,
+		"removed":            s.store.Reset(method, r.URL.Path),
+		"removedDefinitions": s.definitions.Reset(method, r.URL.Path),
 	})
 }
 
@@ -445,8 +688,9 @@ func (s *Service) HandleGlobalReset(w http.ResponseWriter, r *http.Request) {
 
 	httpapi.DrainBody(r)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":  "Reset",
-		"removed": s.store.ResetAll(),
+		"status":             "Reset",
+		"removed":            s.store.ResetAll(),
+		"removedDefinitions": s.definitions.ResetAll(),
 	})
 }
 
@@ -530,6 +774,9 @@ func (s *Service) ServeConfigured(w http.ResponseWriter, r *http.Request) bool {
 	w.WriteHeader(entry.Status)
 	_, _ = w.Write(output)
 	success = true
+	if len(entry.Then) > 0 {
+		s.applyThenSetups(r, entry.Then)
+	}
 	goslog.Default().Info(r.Method, "path", r.RequestURI, "configured", true)
 	return true
 }

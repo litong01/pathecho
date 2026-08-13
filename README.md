@@ -169,6 +169,85 @@ String values in `response.body` and response header values are rendered as Go
 Templates are validated when configured. File, environment, network, shell,
 reflection, and arbitrary Go package access are not exposed.
 
+### Named and deferred setups (`name` + `then`)
+
+Sometimes a response should change only *after* some other request has been
+served, and the application under test fires many dependency requests in
+between. There is no reliable moment to squeeze in a second `DO=setup` from the
+outside. Instead, stage the follow-up ahead of time under a name and let the
+triggering request install it.
+
+Add `name` to a normal `DO=setup` request to save it without activating it:
+
+```shell
+curl -X POST 'http://localhost:9095/status?DO=setup' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "method": "GET",
+    "name": "status-done",
+    "response": {"status": 200, "body": {"state": "done"}}
+  }'
+```
+
+Then list that name in `then` on the request that should trigger it. Each setup
+stays small and flat, and `then` is just a list of names:
+
+```shell
+# GET /status answers "pending" for now.
+curl -X POST 'http://localhost:9095/status?DO=setup' \
+  -H 'Content-Type: application/json' \
+  -d '{"method":"GET","response":{"body":{"state":"pending"}}}'
+
+# Serving POST /job swaps in the "status-done" definition.
+curl -X POST 'http://localhost:9095/job?DO=setup' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "method": "POST",
+    "response": {"status": 202, "body": {"state": "queued"}},
+    "then": ["status-done"]
+  }'
+```
+
+`GET /status` returns `pending` until the app calls `POST /job`. At that moment
+the `status-done` definition is applied exactly as if you had sent its
+`DO=setup` right then, no matter how many other dependency requests happen
+first.
+
+The name may also be given as the `DONAME` query parameter, which keeps the
+body to just the response:
+
+```shell
+curl -X POST 'http://localhost:9095/status?DO=setup&DONAME=status-done' \
+  -H 'Content-Type: application/json' \
+  -d '{"method":"GET","response":{"body":{"state":"done"}}}'
+```
+
+Notes:
+
+- An unnamed `DO=setup` activates immediately, preserving the existing behavior.
+  A named `DO=setup` is saved for later and activates only when referenced by a
+  served response's `then` list.
+- The method and path come from the named setup request itself, exactly as they
+  do for an unnamed setup. Templated paths such as `/orders/:orderID` work too.
+- `then` names are resolved when the triggering response is served, so a
+  definition can be registered before or after the setup that references it.
+  A name that is still unknown at that point is logged and skipped; the other
+  names in the list are applied.
+- Definitions chain naturally without nesting: give a definition its own `then`
+  list, and applying it stages the next step. `A -> then ["B"]` and
+  `B -> then ["C"]` walks the chain one served request at a time.
+- The `then` list is applied every time the triggering response is served, each
+  time as a fresh copy (so `times` and any `delays` cycle start over). Use
+  `times` on the trigger to bound how often that happens.
+- If serving the trigger fails (for example a response template error), its
+  `then` list is not applied.
+- Response templates in a definition are rendered against the follow-up request
+  when that request arrives, not against the triggering request.
+- Names are at most 128 characters and may not contain control characters. The
+  server stores at most 1,024 definitions. Redefining a name replaces it.
+- Definitions are cleared by `DO=reset` on their path and by the global
+  `/RESET`; both report a `removedDefinitions` count.
+
 ### Reset responses
 
 Reset one method on a path:
@@ -190,6 +269,9 @@ Reset all configured responses:
 ```shell
 curl -X POST 'http://localhost:9095/RESET'
 ```
+
+Both forms also remove the named setup definitions registered on the affected
+paths and report them as `removedDefinitions` alongside `removed`.
 
 ## Test OAuth provider
 

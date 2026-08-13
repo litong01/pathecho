@@ -244,6 +244,43 @@ func TestInvalidTemplatesAndMathErrorsAreReported(t *testing.T) {
 	}
 }
 
+// A named setup must stay inactive until a served response names it in
+// "then", even though the app makes unrelated requests in between.
+func TestNamedSetupIsAppliedByTriggeringRequest(t *testing.T) {
+	router := NewRouter()
+
+	response := performJSONRequest(t, router, http.MethodPost, "/status?DO=setup&DONAME=status-done", map[string]any{
+		"method":   http.MethodGet,
+		"response": map[string]any{"body": "done"},
+	})
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"status":"Saved"`) {
+		t.Fatalf("named setup = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	performSetup(t, router, "/status", http.MethodGet, "pending", nil)
+	response = performJSONRequest(t, router, http.MethodPost, "/job?DO=setup", map[string]any{
+		"method":   http.MethodPost,
+		"response": map[string]any{"body": "queued"},
+		"then":     []string{"status-done"},
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("trigger setup = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	if response = performRequest(router, http.MethodGet, "/status", ""); response.Body.String() != "pending" {
+		t.Fatalf("status before trigger = %s", response.Body.String())
+	}
+	// An unrelated dependency request must not disturb the pending definition.
+	performRequest(router, http.MethodGet, "/some/dependency", "")
+
+	if response = performRequest(router, http.MethodPost, "/job", ""); response.Body.String() != "queued" {
+		t.Fatalf("trigger serve = %s", response.Body.String())
+	}
+	if response = performRequest(router, http.MethodGet, "/status", ""); response.Body.String() != "done" {
+		t.Fatalf("status after trigger = %s", response.Body.String())
+	}
+}
+
 func performSetup(
 	t *testing.T,
 	router http.Handler,
