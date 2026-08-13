@@ -19,9 +19,9 @@ func TestMemoryStoreConsumesHitsAtomically(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			if entry, ok := store.Take(http.MethodGet, "/limited"); ok {
+			if match, ok := store.Take(http.MethodGet, "/limited"); ok {
 				atomic.AddInt32(&served, 1)
-				store.Complete(http.MethodGet, "/limited", entry, true)
+				store.Complete(match, true)
 			}
 		}()
 	}
@@ -43,6 +43,25 @@ func TestMemoryStoreHasBoundedEntries(t *testing.T) {
 	}
 	if err := store.Set(http.MethodGet, "/0", &responseEntry{}); err != nil {
 		t.Fatalf("store rejected overwrite at capacity: %v", err)
+	}
+}
+
+func TestMemoryStoreCompletesTemplatedPathUsingSetupKey(t *testing.T) {
+	store := newMemoryStore()
+	if err := store.Set(http.MethodGet, "/account/:accountID", &responseEntry{Remaining: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	match, ok := store.Take(http.MethodGet, "/account/acct-123")
+	if !ok {
+		t.Fatal("templated path did not match")
+	}
+	if match.Key.Path != "/account/:accountID" || match.PathParams["accountID"] != "acct-123" {
+		t.Fatalf("match = %#v", match)
+	}
+	store.Complete(match, true)
+	if removed := store.ResetAll(); removed != 0 {
+		t.Fatalf("completed templated response was not removed; reset removed %d entries", removed)
 	}
 }
 

@@ -43,12 +43,18 @@ type responseEntry struct {
 	InFlight        int
 }
 
+type responseMatch struct {
+	Key        responseKey
+	Entry      *responseEntry
+	PathParams map[string]string
+}
+
 // responseStore hides the backing store so a shared implementation can be
 // added later without changing the HTTP handlers.
 type responseStore interface {
 	Set(method, path string, entry *responseEntry) error
-	Take(method, path string) (*responseEntry, bool)
-	Complete(method, path string, entry *responseEntry, success bool)
+	Take(method, path string) (*responseMatch, bool)
+	Complete(match *responseMatch, success bool)
 	Reset(method, path string) int
 	ResetAll() int
 }
@@ -73,15 +79,19 @@ func (s *memoryStore) Set(method, path string, entry *responseEntry) error {
 	return nil
 }
 
-// Take gets an entry and atomically consumes one of its allowed hits.
-func (s *memoryStore) Take(method, path string) (*responseEntry, bool) {
+// Take gets the most specific matching entry and atomically consumes one of
+// its allowed hits. Exact paths take precedence over templated paths.
+func (s *memoryStore) Take(method, path string) (*responseMatch, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	key := responseKey{Method: method, Path: path}
 	entry, ok := s.entries[key]
 	if !ok {
-		return nil, false
+		key, entry, ok = s.findTemplateMatch(method, path)
+		if !ok {
+			return nil, false
+		}
 	}
 	if entry.Remaining == 0 {
 		return nil, false
@@ -90,30 +100,82 @@ func (s *memoryStore) Take(method, path string) (*responseEntry, bool) {
 		entry.Remaining--
 		entry.InFlight++
 	}
-	return entry, true
+	params, _ := matchTemplatePath(key.Path, path)
+	return &responseMatch{Key: key, Entry: entry, PathParams: params}, true
 }
 
-func (s *memoryStore) Complete(
-	method string,
-	path string,
-	entry *responseEntry,
-	success bool,
-) {
+func (s *memoryStore) findTemplateMatch(method, path string) (responseKey, *responseEntry, bool) {
+	var bestKey responseKey
+	var bestEntry *responseEntry
+	bestLiteralCount := -1
+
+	for key, entry := range s.entries {
+		if key.Method != method {
+			continue
+		}
+		_, literalCount, ok := matchTemplatePathSpecificity(key.Path, path)
+		if !ok || literalCount < bestLiteralCount ||
+			(literalCount == bestLiteralCount && bestEntry != nil && key.Path >= bestKey.Path) {
+			continue
+		}
+		bestKey = key
+		bestEntry = entry
+		bestLiteralCount = literalCount
+	}
+	return bestKey, bestEntry, bestEntry != nil
+}
+
+func (s *memoryStore) Complete(match *responseMatch, success bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := responseKey{Method: method, Path: path}
-	current, ok := s.entries[key]
-	if !ok || current != entry || entry.InFlight == 0 {
+	current, ok := s.entries[match.Key]
+	if !ok || current != match.Entry || match.Entry.InFlight == 0 {
 		return
 	}
-	entry.InFlight--
+	match.Entry.InFlight--
 	if !success {
-		entry.Remaining++
+		match.Entry.Remaining++
 	}
-	if success && entry.Remaining == 0 && entry.InFlight == 0 {
-		delete(s.entries, key)
+	if success && match.Entry.Remaining == 0 && match.Entry.InFlight == 0 {
+		delete(s.entries, match.Key)
 	}
+}
+
+func matchTemplatePath(pattern, path string) (map[string]string, bool) {
+	params, _, ok := matchTemplatePathSpecificity(pattern, path)
+	return params, ok
+}
+
+func matchTemplatePathSpecificity(pattern, path string) (map[string]string, int, bool) {
+	patternSegments := strings.Split(pattern, "/")
+	pathSegments := strings.Split(path, "/")
+	if len(patternSegments) != len(pathSegments) {
+		return nil, 0, false
+	}
+
+	params := make(map[string]string)
+	literalCount := 0
+	hasParam := false
+	for index, patternSegment := range patternSegments {
+		pathSegment := pathSegments[index]
+		if strings.HasPrefix(patternSegment, ":") && len(patternSegment) > 1 {
+			if pathSegment == "" {
+				return nil, 0, false
+			}
+			params[patternSegment[1:]] = pathSegment
+			hasParam = true
+			continue
+		}
+		if patternSegment != pathSegment {
+			return nil, 0, false
+		}
+		literalCount++
+	}
+	if !hasParam {
+		return nil, 0, false
+	}
+	return params, literalCount, true
 }
 
 func (s *memoryStore) Reset(method, path string) int {
@@ -389,20 +451,26 @@ func (s *Service) HandleGlobalReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) ServeConfigured(w http.ResponseWriter, r *http.Request) bool {
-	entry, ok := s.store.Take(r.Method, r.URL.Path)
+	match, ok := s.store.Take(r.Method, r.URL.Path)
 	if !ok {
 		return false
 	}
 	success := false
 	defer func() {
-		s.store.Complete(r.Method, r.URL.Path, entry, success)
+		s.store.Complete(match, success)
 	}()
+	entry := match.Entry
 
 	if err := applyResponseDelay(r.Context(), entry.Delay); err != nil {
 		return true
 	}
 
 	query := r.URL.Query()
+	for name, value := range match.PathParams {
+		if _, exists := query[name]; !exists {
+			query.Set(name, value)
+		}
+	}
 	headers := r.Header.Clone()
 	body, err := httpapi.ReadBody(r)
 	if err != nil {

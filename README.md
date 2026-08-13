@@ -54,6 +54,33 @@ The configured response is matched by method and path:
 curl 'http://localhost:9095/users?name=Sam&age=30&user-id=u-42'
 ```
 
+Use `:name` segments to configure a response for a templated path. Captured
+values are added to `.Query` and `.Q`, so existing response templates can use
+them like query parameters:
+
+```shell
+curl -X POST \
+  'http://localhost:9095/account/:accountID/users/:userId?DO=setup' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "method": "GET",
+    "response": {
+      "headers": {"Content-Type": "application/json"},
+      "body": {
+        "accountID": "{{.Q.accountID}}",
+        "userId": "{{.Q.userId}}"
+      }
+    }
+  }'
+
+curl 'http://localhost:9095/account/acct-123/users/user-456'
+```
+
+Each named segment matches one non-empty path segment. A real query parameter
+with the same name takes precedence over a captured path value. Exact paths
+take precedence over templated paths; among matching templates, the one with
+more literal segments is used.
+
 Echo fields from a JSON request body with `jsonPath` (`.Body` is always the
 raw body; `.J` is set when that body is valid JSON):
 

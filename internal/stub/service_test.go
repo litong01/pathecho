@@ -445,6 +445,106 @@ func TestServeConfiguredUsesRequestBodyAndJSONPath(t *testing.T) {
 	}
 }
 
+func TestServeConfiguredMatchesTemplatedPath(t *testing.T) {
+	service := NewService()
+
+	recorder := httptest.NewRecorder()
+	request := jsonRequest(http.MethodPost, "/account/:accountID/users/:userId?DO=setup", map[string]any{
+		"method": http.MethodGet,
+		"response": map[string]any{
+			"headers": map[string]string{
+				"Content-Type": "application/json",
+				"X-Account-ID": "{{.Q.accountID}}",
+			},
+			"body": map[string]any{
+				"accountID": "{{.Q.accountID}}",
+				"userId":    "{{.Query.Get `userId`}}",
+			},
+		},
+	})
+	service.HandleSetup(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("setup = %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/account/acct-123/users/user-456", nil)
+	if !service.ServeConfigured(recorder, request) {
+		t.Fatal("templated response was not served")
+	}
+	if recorder.Header().Get("X-Account-ID") != "acct-123" {
+		t.Fatalf("X-Account-ID = %q", recorder.Header().Get("X-Account-ID"))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, recorder.Body.String())
+	}
+	if payload["accountID"] != "acct-123" || payload["userId"] != "user-456" {
+		t.Fatalf("payload = %#v", payload)
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(
+		http.MethodGet,
+		"/account/path-account/users/path-user?accountID=query-account&userId=query-user",
+		nil,
+	)
+	if !service.ServeConfigured(recorder, request) {
+		t.Fatal("templated response with query parameters was not served")
+	}
+	if recorder.Header().Get("X-Account-ID") != "query-account" {
+		t.Fatalf("query parameter did not override path parameter: %q", recorder.Header().Get("X-Account-ID"))
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, recorder.Body.String())
+	}
+	if payload["accountID"] != "query-account" || payload["userId"] != "query-user" {
+		t.Fatalf("query parameters did not win: %#v", payload)
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/account/acct-123/groups/group-456", nil)
+	if service.ServeConfigured(recorder, request) {
+		t.Fatal("non-matching path was served")
+	}
+}
+
+func TestConfiguredPathMatchingPrecedence(t *testing.T) {
+	service := NewService()
+	setup := func(path, body string) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		service.HandleSetup(recorder, jsonRequest(http.MethodPost, path+"?DO=setup", map[string]any{
+			"method":   http.MethodGet,
+			"response": map[string]any{"body": body},
+		}))
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("setup %s = %d %s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	setup("/account/:accountID", "template")
+	setup("/account/special", "exact")
+	setup("/category/:categoryID/:kind", "generic-template")
+	setup("/category/:categoryID/users", "specific-template")
+
+	recorder := httptest.NewRecorder()
+	if !service.ServeConfigured(recorder, httptest.NewRequest(http.MethodGet, "/account/special", nil)) {
+		t.Fatal("exact response was not served")
+	}
+	if recorder.Body.String() != "exact" {
+		t.Fatalf("body = %q, want exact", recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	if !service.ServeConfigured(recorder, httptest.NewRequest(http.MethodGet, "/category/123/users", nil)) {
+		t.Fatal("specific templated response was not served")
+	}
+	if recorder.Body.String() != "specific-template" {
+		t.Fatalf("body = %q, want specific-template", recorder.Body.String())
+	}
+}
+
 func TestMemoryStoreResetAndCompleteEdgeCases(t *testing.T) {
 	store := newMemoryStore()
 	_ = store.Set(http.MethodGet, "/one", &responseEntry{Remaining: 1})
@@ -463,16 +563,16 @@ func TestMemoryStoreResetAndCompleteEdgeCases(t *testing.T) {
 
 	entry := &responseEntry{Remaining: 1}
 	_ = store.Set(http.MethodGet, "/retry", entry)
-	got, ok := store.Take(http.MethodGet, "/retry")
+	match, ok := store.Take(http.MethodGet, "/retry")
 	if !ok {
 		t.Fatal("take failed")
 	}
-	store.Complete(http.MethodGet, "/retry", got, false)
+	store.Complete(match, false)
 	if entry.Remaining != 1 || entry.InFlight != 0 {
 		t.Fatalf("failed complete left remaining=%d inFlight=%d", entry.Remaining, entry.InFlight)
 	}
-	store.Complete(http.MethodGet, "/retry", &responseEntry{}, true)
-	store.Complete(http.MethodGet, "/missing", entry, true)
+	store.Complete(&responseMatch{Key: responseKey{Method: http.MethodGet, Path: "/retry"}, Entry: &responseEntry{}}, true)
+	store.Complete(&responseMatch{Key: responseKey{Method: http.MethodGet, Path: "/missing"}, Entry: entry}, true)
 
 	exhausted := &responseEntry{Remaining: 0}
 	_ = store.Set(http.MethodGet, "/empty", exhausted)
