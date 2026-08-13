@@ -171,3 +171,40 @@ func TestTemplateFunctionErrors(t *testing.T) {
 		t.Fatal("default true failed")
 	}
 }
+
+func TestJSONPathHelper(t *testing.T) {
+	doc := map[string]any{
+		"user": map[string]any{"name": "Sam", "age": float64(30)},
+		"tags": []any{"go", "http"},
+	}
+	got, err := jsonPath("$.user.name", doc)
+	if err != nil || got != "Sam" {
+		t.Fatalf("string path = %q, %v", got, err)
+	}
+	got, err = jsonPath("$.user.age", doc)
+	if err != nil || got != "30" {
+		t.Fatalf("number path = %q, %v", got, err)
+	}
+	got, err = jsonPath("$.tags[*]", doc)
+	if err != nil || got != `["go","http"]` {
+		t.Fatalf("multi path = %q, %v", got, err)
+	}
+	got, err = jsonPath("$.missing", doc)
+	if err != nil || got != "" {
+		t.Fatalf("missing path = %q, %v", got, err)
+	}
+	got, err = jsonPath("$.user.name", `{"user":{"name":"Ada"}}`)
+	if err != nil || got != "Ada" {
+		t.Fatalf("string doc = %q, %v", got, err)
+	}
+	if _, err := jsonPath("$.x", "not-json"); err == nil {
+		t.Fatal("non-JSON string doc accepted")
+	}
+	if _, err := jsonPath("$.[", doc); err == nil {
+		t.Fatal("invalid path accepted")
+	}
+	got, err = jsonPath("$.x", nil)
+	if err != nil || got != "" {
+		t.Fatalf("nil doc = %q, %v", got, err)
+	}
+}

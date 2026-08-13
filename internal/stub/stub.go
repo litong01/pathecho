@@ -14,6 +14,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/ohler55/ojg/jp"
 	"github.com/pathecho/internal/httpapi"
 	goslog "golang.org/x/exp/slog"
 )
@@ -170,9 +171,13 @@ type templateData struct {
 	Header http.Header
 	// Q and H are first-value maps for escape-friendly template access
 	// such as {{.Q.age}} and {{.H.Authorization}}.
-	Q   map[string]string
-	H   map[string]string
-	Now time.Time
+	Q map[string]string
+	H map[string]string
+	// Body is the raw request body (any content type). J is the parsed JSON
+	// value when Body is valid JSON; otherwise J is nil.
+	Body string
+	J    any
+	Now  time.Time
 }
 
 type limitedBuffer struct {
@@ -399,6 +404,15 @@ func (s *Service) ServeConfigured(w http.ResponseWriter, r *http.Request) bool {
 
 	query := r.URL.Query()
 	headers := r.Header.Clone()
+	body, err := httpapi.ReadBody(r)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, httpapi.ErrBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSONError(w, status, err)
+		return true
+	}
 	data := templateData{
 		Method: r.Method,
 		Path:   r.URL.Path,
@@ -406,6 +420,8 @@ func (s *Service) ServeConfigured(w http.ResponseWriter, r *http.Request) bool {
 		Header: headers,
 		Q:      firstValues(query),
 		H:      firstValues(headers),
+		Body:   string(body),
+		J:      parseJSONBody(body),
 		Now:    time.Now().UTC(),
 	}
 
@@ -666,6 +682,58 @@ func templateFunctions() template.FuncMap {
 		"unix":       func(value time.Time) int64 { return value.Unix() },
 		"toJSON":     toJSON,
 		"jsonString": toJSON,
+		"jsonPath":   jsonPath,
+	}
+}
+
+// parseJSONBody returns the decoded JSON value when data is valid JSON.
+// Non-JSON or empty bodies return nil.
+func parseJSONBody(data []byte) any {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	var parsed any
+	if err := json.Unmarshal(trimmed, &parsed); err != nil {
+		return nil
+	}
+	return parsed
+}
+
+// jsonPath evaluates a JSONPath expression against doc.
+// Call as {{jsonPath "$.name" .J}} or {{.J | jsonPath "$.name"}}.
+// Missing matches render as empty. A single string match is returned as-is;
+// other single values and multi-matches are returned as JSON text so object
+// response bodies can re-parse them into typed JSON values.
+func jsonPath(path string, doc any) (string, error) {
+	if doc == nil {
+		return "", nil
+	}
+	if raw, ok := doc.(string); ok {
+		parsed := parseJSONBody([]byte(raw))
+		if parsed == nil {
+			if strings.TrimSpace(raw) == "" {
+				return "", nil
+			}
+			return "", fmt.Errorf("jsonPath: document is not valid JSON")
+		}
+		doc = parsed
+	}
+	expr, err := jp.ParseString(path)
+	if err != nil {
+		return "", fmt.Errorf("jsonPath: %w", err)
+	}
+	results := expr.Get(doc)
+	switch len(results) {
+	case 0:
+		return "", nil
+	case 1:
+		if value, ok := results[0].(string); ok {
+			return value, nil
+		}
+		return toJSON(results[0])
+	default:
+		return toJSON(results)
 	}
 }
 

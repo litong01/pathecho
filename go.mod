@@ -2,6 +2,9 @@ module github.com/pathecho
 
 require github.com/gorilla/mux v1.8.0
 
-require golang.org/x/exp v0.0.0-20230905200255-921286631fa9
+require (
+	github.com/ohler55/ojg v1.28.4
+	golang.org/x/exp v0.0.0-20230905200255-921286631fa9
+)
 
 go 1.23

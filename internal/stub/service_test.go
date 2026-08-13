@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pathecho/internal/httpapi"
 	goslog "golang.org/x/exp/slog"
 )
 
@@ -354,6 +355,93 @@ func TestServeConfiguredRejectsInvalidRenderedOutput(t *testing.T) {
 	request = httptest.NewRequest(http.MethodGet, "/string-body?name=world", nil)
 	if !service.ServeConfigured(recorder, request) || recorder.Body.String() != "hello world" {
 		t.Fatalf("string body = %d %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestServeConfiguredUsesRequestBodyAndJSONPath(t *testing.T) {
+	service := NewService()
+
+	recorder := httptest.NewRecorder()
+	request := jsonRequest(http.MethodPost, "/echo?DO=setup", map[string]any{
+		"method": http.MethodPost,
+		"response": map[string]any{
+			"status": 200,
+			"headers": map[string]string{
+				"Content-Type": "application/json",
+				"X-Raw":        "{{.Body}}",
+			},
+			"body": map[string]any{
+				"name":    `{{jsonPath "$.user.name" .J}}`,
+				"age":     `{{jsonPath "$.user.age" .J}}`,
+				"tag":     `{{.J | jsonPath "$.tags[0]"}}`,
+				"nested":  `{{jsonPath "$.user" .J}}`,
+				"missing": `{{jsonPath "$.nope" .J}}`,
+			},
+		},
+	})
+	service.HandleSetup(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("setup = %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(
+		http.MethodPost,
+		"/echo",
+		strings.NewReader(`{"user":{"name":"Sam","age":30},"tags":["go"]}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	if !service.ServeConfigured(recorder, request) {
+		t.Fatal("configured response was not served")
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("X-Raw"); got != `{"user":{"name":"Sam","age":30},"tags":["go"]}` {
+		t.Fatalf("X-Raw = %q", got)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v body=%s", err, recorder.Body.String())
+	}
+	if payload["name"] != "Sam" || payload["age"] != float64(30) || payload["tag"] != "go" || payload["missing"] != "" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	nested, ok := payload["nested"].(map[string]any)
+	if !ok || nested["name"] != "Sam" || nested["age"] != float64(30) {
+		t.Fatalf("nested = %#v", payload["nested"])
+	}
+
+	recorder = httptest.NewRecorder()
+	request = jsonRequest(http.MethodPost, "/plain?DO=setup", map[string]any{
+		"method": http.MethodPost,
+		"response": map[string]any{
+			"body": "got={{.Body}}",
+		},
+	})
+	service.HandleSetup(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("plain setup = %d %s", recorder.Code, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/plain", strings.NewReader("not-json"))
+	if !service.ServeConfigured(recorder, request) || recorder.Body.String() != "got=not-json" {
+		t.Fatalf("plain body = %d %q", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	request = jsonRequest(http.MethodPost, "/huge?DO=setup", map[string]any{
+		"method":   http.MethodPost,
+		"response": map[string]any{"body": "{{.Body}}"},
+	})
+	service.HandleSetup(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("huge setup = %d %s", recorder.Code, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/huge", strings.NewReader(strings.Repeat("x", httpapi.MaxBodySize+1)))
+	if !service.ServeConfigured(recorder, request) || recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized = %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 

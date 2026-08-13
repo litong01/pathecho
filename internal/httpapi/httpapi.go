@@ -11,12 +11,31 @@ import (
 
 const MaxBodySize = 1 << 20 // 1 MiB
 
+var ErrBodyTooLarge = errors.New("request body exceeds maximum size")
+
 func DrainBody(r *http.Request) {
 	if r.Body == nil {
 		return
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, MaxBodySize+1))
 	_ = r.Body.Close()
+}
+
+// ReadBody reads up to MaxBodySize bytes from the request body and closes it.
+// Empty or missing bodies return a nil slice.
+func ReadBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	defer r.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(r.Body, MaxBodySize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxBodySize {
+		return nil, ErrBodyTooLarge
+	}
+	return data, nil
 }
 
 func ControlAction(r *http.Request) string {

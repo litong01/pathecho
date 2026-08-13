@@ -115,6 +115,46 @@ func TestStubTemplatedJSONResponse(t *testing.T) {
 }
 
 /*
+Example: echo JSON request body fields with jsonPath.
+
+	curl -X POST 'http://localhost:9095/users?DO=setup' ...
+	curl -X POST 'http://localhost:9095/users' -d '{"user":{"name":"Sam","age":30}}'
+*/
+func TestStubJSONPathRequestBody(t *testing.T) {
+	resetServer(t)
+
+	setup := doJSON(t, http.MethodPost, "/users?DO=setup", map[string]any{
+		"method": "POST",
+		"response": map[string]any{
+			"status": 200,
+			"headers": map[string]string{
+				"Content-Type": "application/json",
+			},
+			"body": map[string]any{
+				"name": `{{jsonPath "$.user.name" .J}}`,
+				"age":  `{{jsonPath "$.user.age" .J}}`,
+				"raw":  "{{.Body}}",
+			},
+		},
+	})
+	mustStatus(t, setup, http.StatusCreated)
+
+	resp := doRequest(t, http.MethodPost, "/users", "application/json",
+		[]byte(`{"user":{"name":"Sam","age":30}}`))
+	mustStatus(t, resp, http.StatusOK)
+
+	var result struct {
+		Name string  `json:"name"`
+		Age  float64 `json:"age"`
+		Raw  string  `json:"raw"`
+	}
+	decodeJSON(t, resp.Body, &result)
+	if result.Name != "Sam" || result.Age != 30 || result.Raw != `{"user":{"name":"Sam","age":30}}` {
+		t.Fatalf("unexpected rendered body: %+v", result)
+	}
+}
+
+/*
 Example: templated redirect Location header.
 
 	curl -X POST 'http://localhost:9095/authorize?DO=setup' \

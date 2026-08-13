@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,26 @@ func TestDrainBodyNilSafe(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
 	request.Body = nil
 	DrainBody(request)
+}
+
+func TestReadBodyLimitsAndEmpty(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	request.Body = nil
+	data, err := ReadBody(request)
+	if err != nil || data != nil {
+		t.Fatalf("nil body = %q, %v", data, err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"ok":true}`))
+	data, err = ReadBody(request)
+	if err != nil || string(data) != `{"ok":true}` {
+		t.Fatalf("ReadBody = %q, %v", data, err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", MaxBodySize+1)))
+	if _, err := ReadBody(request); !errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("oversized body err = %v", err)
+	}
 }
 
 func TestDecodeJSONBodyRejectsMultipleValuesAndTrailingJunk(t *testing.T) {

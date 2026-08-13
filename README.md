@@ -17,8 +17,8 @@ stub responses with Go templates, hit limits, response delays, and reset control
 ## Configure stub responses
 
 Use a `POST` request with `DO=setup` to configure a response for a method and
-path. Query parameters on later requests are available to the template but are
-not part of response matching.
+path. Query parameters and the request body on later requests are available to
+the template but are not part of response matching.
 
 Prefer a JSON object (or array) for `response.body` so you do not have to
 escape the entire payload as a string. Each string value in that object is
@@ -52,6 +52,30 @@ The configured response is matched by method and path:
 
 ```shell
 curl 'http://localhost:9095/users?name=Sam&age=30&user-id=u-42'
+```
+
+Echo fields from a JSON request body with `jsonPath` (`.Body` is always the
+raw body; `.J` is set when that body is valid JSON):
+
+```shell
+curl -X POST 'http://localhost:9095/users?DO=setup' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "method": "POST",
+    "response": {
+      "status": 200,
+      "headers": {"Content-Type": "application/json"},
+      "body": {
+        "name": "{{jsonPath \"$.user.name\" .J}}",
+        "age": "{{jsonPath \"$.user.age\" .J}}",
+        "raw": "{{.Body}}"
+      }
+    }
+  }'
+
+curl -X POST 'http://localhost:9095/users' \
+  -H 'Content-Type: application/json' \
+  -d '{"user":{"name":"Sam","age":30}}'
 ```
 
 Response header values use the same templates. For example, configure a
@@ -91,11 +115,18 @@ from 0 through 30000 (30 seconds).
 String values in `response.body` and response header values are rendered as Go
 `text/template` templates. Status is fixed at setup time. The template receives:
 
-- `.Method`, `.Path`, `.Query`, `.Header`, `.Q`, `.H`, and `.Now`
+- `.Method`, `.Path`, `.Query`, `.Header`, `.Q`, `.H`, `.Body`, `.J`, and `.Now`
 - `.Q` / `.H`: first-value maps for query params and request headers
   (`{{.Q.age}}`, `{{.H.Authorization}}`). Missing keys render as empty.
   Keys that are not valid identifiers (for example `user-id`) need
   `index` with backticks, such as `{{index .Q `user-id`}}`.
+- `.Body`: raw request body as a string (any content type)
+- `.J`: parsed JSON value when `.Body` is valid JSON; otherwise empty/nil
+- `jsonPath`: JSONPath helper for `.J` (or a JSON string), for example
+  `{{jsonPath "$.user.name" .J}}` or `{{.J | jsonPath "$.user.age"}}`.
+  Missing matches render as empty. A single string match is returned as text;
+  other values (and multi-matches) are returned as JSON text so object
+  response bodies can insert them as typed JSON.
 - Numeric helpers: `add`, `sub`, `mul`, `div`, `mod`, `abs`, `min`, `max`,
   `pow`, `sqrt`, `log`, `round`, `floor`, `ceil`, `parseInt`, and `parseFloat`
 - String helpers: `lower`, `upper`, `trim`, `contains`, `replace`, `split`,
