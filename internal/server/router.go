@@ -195,6 +195,8 @@ func NewRouter() *mux.Router {
 		switch httpapi.ControlAction(r) {
 		case "setup":
 			stubs.HandleSetup(w, r)
+		case "list":
+			stubs.HandleList(w, r)
 		case "reset":
 			stubs.HandlePathReset(w, r)
 		default:

@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +49,11 @@ type responseEntry struct {
 	// which matters when an application makes many dependency requests before
 	// the follow-up response is needed. Names are resolved at serve time.
 	Then []string
+	// Original setup fields retained for DO=list. Compiled templates above are
+	// what serving uses; these are what operators inspect.
+	HeaderSources map[string]string
+	BodySource    json.RawMessage
+	DelaysSource  json.RawMessage
 }
 
 // setupDefinition is a compiled, named setup awaiting application. Definitions
@@ -72,6 +78,9 @@ func (e *responseEntry) freshCopy() *responseEntry {
 		Delay:           e.Delay.clone(),
 		Remaining:       e.Remaining,
 		Then:            e.Then,
+		HeaderSources:   e.HeaderSources,
+		BodySource:      append(json.RawMessage(nil), e.BodySource...),
+		DelaysSource:    append(json.RawMessage(nil), e.DelaysSource...),
 	}
 }
 
@@ -79,6 +88,21 @@ type responseMatch struct {
 	Key        responseKey
 	Entry      *responseEntry
 	PathParams map[string]string
+}
+
+// listedResponse is a listable snapshot of an active configured response.
+type listedResponse struct {
+	Method string
+	Path   string
+	Entry  *responseEntry
+}
+
+// listedDefinition is a listable snapshot of a named setup definition.
+type listedDefinition struct {
+	Name   string
+	Method string
+	Path   string
+	Proto  *responseEntry
 }
 
 // responseStore hides the backing store so a shared implementation can be
@@ -89,6 +113,7 @@ type responseStore interface {
 	Complete(match *responseMatch, success bool)
 	Reset(method, path string) int
 	ResetAll() int
+	List() []listedResponse
 }
 
 type memoryStore struct {
@@ -241,6 +266,27 @@ func (s *memoryStore) ResetAll() int {
 	return removed
 }
 
+func (s *memoryStore) List() []listedResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]listedResponse, 0, len(s.entries))
+	for key, entry := range s.entries {
+		out = append(out, listedResponse{
+			Method: key.Method,
+			Path:   key.Path,
+			Entry:  entry.freshCopy(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Method < out[j].Method
+	})
+	return out
+}
+
 // definitionStore holds named setups awaiting application. It is kept separate
 // from responseStore so active responses and pending definitions can be backed
 // independently.
@@ -249,6 +295,7 @@ type definitionStore interface {
 	Lookup(name string) (*setupDefinition, bool)
 	Reset(method, path string) int
 	ResetAll() int
+	List() []listedDefinition
 }
 
 type memoryDefinitionStore struct {
@@ -304,6 +351,31 @@ func (s *memoryDefinitionStore) ResetAll() int {
 	removed := len(s.definitions)
 	s.definitions = make(map[string]*setupDefinition)
 	return removed
+}
+
+func (s *memoryDefinitionStore) List() []listedDefinition {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]listedDefinition, 0, len(s.definitions))
+	for _, definition := range s.definitions {
+		out = append(out, listedDefinition{
+			Name:   definition.Name,
+			Method: definition.Method,
+			Path:   definition.Path,
+			Proto:  definition.Proto.freshCopy(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Method < out[j].Method
+	})
+	return out
 }
 
 type setupRequest struct {
@@ -600,7 +672,21 @@ func compileEntry(name string, spec setupRequest, remaining int, funcs template.
 		Delay:           delay,
 		Remaining:       remaining,
 		Then:            thenNames,
+		HeaderSources:   cloneHeaderSources(spec.Response.Headers),
+		BodySource:      append(json.RawMessage(nil), spec.Response.Body...),
+		DelaysSource:    append(json.RawMessage(nil), spec.Delays...),
 	}, nil
+}
+
+func cloneHeaderSources(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(headers))
+	for key, value := range headers {
+		out[key] = value
+	}
+	return out
 }
 
 // normalizeThenNames trims and validates the "then" names. Names are resolved
@@ -681,6 +767,72 @@ func (s *Service) HandlePathReset(w http.ResponseWriter, r *http.Request) {
 		"removed":            s.store.Reset(method, r.URL.Path),
 		"removedDefinitions": s.definitions.Reset(method, r.URL.Path),
 	})
+}
+
+// HandleList returns every active configured response and every saved named
+// setup definition. The request path is ignored; listing is always global.
+func (s *Service) HandleList(w http.ResponseWriter, r *http.Request) {
+	logControlRequest(r, "list", nil)
+	httpapi.DrainBody(r)
+
+	active := s.store.List()
+	saved := s.definitions.List()
+	setups := make([]setupListEntry, 0, len(active)+len(saved))
+	for _, item := range active {
+		setups = append(setups, newSetupListEntry("active", "", item.Method, item.Path, item.Entry))
+	}
+	for _, item := range saved {
+		setups = append(setups, newSetupListEntry("saved", item.Name, item.Method, item.Path, item.Proto))
+	}
+
+	writeJSON(w, http.StatusOK, setupListResponse{
+		Status: "List",
+		Count:  len(setups),
+		Setups: setups,
+	})
+}
+
+type setupListResponse struct {
+	Status string           `json:"status"`
+	Count  int              `json:"count"`
+	Setups []setupListEntry `json:"setups"`
+}
+
+type setupListEntry struct {
+	State    string          `json:"state"`
+	Name     string          `json:"name,omitempty"`
+	Method   string          `json:"method"`
+	Path     string          `json:"path"`
+	Times    any             `json:"times"`
+	Delays   json.RawMessage `json:"delays,omitempty"`
+	Then     []string        `json:"then,omitempty"`
+	Response setupResponse   `json:"response"`
+}
+
+func newSetupListEntry(state, name, method, path string, entry *responseEntry) setupListEntry {
+	item := setupListEntry{
+		State:  state,
+		Name:   name,
+		Method: method,
+		Path:   path,
+		Times:  remainingValue(entry.Remaining),
+		Response: setupResponse{
+			Status: entry.Status,
+		},
+	}
+	if len(entry.Then) > 0 {
+		item.Then = append([]string(nil), entry.Then...)
+	}
+	if len(entry.DelaysSource) > 0 && string(entry.DelaysSource) != "null" {
+		item.Delays = append(json.RawMessage(nil), entry.DelaysSource...)
+	}
+	if len(entry.HeaderSources) > 0 {
+		item.Response.Headers = cloneHeaderSources(entry.HeaderSources)
+	}
+	if len(entry.BodySource) > 0 && string(entry.BodySource) != "null" {
+		item.Response.Body = append(json.RawMessage(nil), entry.BodySource...)
+	}
+	return item
 }
 
 func (s *Service) HandleGlobalReset(w http.ResponseWriter, r *http.Request) {

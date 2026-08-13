@@ -204,6 +204,60 @@ func TestMethodPathAndGlobalReset(t *testing.T) {
 	}
 }
 
+func TestListConfiguredSetups(t *testing.T) {
+	router := NewRouter()
+	response := performJSONRequest(t, router, http.MethodPost, "/listed?DO=setup", map[string]any{
+		"method": http.MethodGet,
+		"response": map[string]any{
+			"status": 200,
+			"headers": map[string]string{
+				"Content-Type": "text/plain",
+			},
+			"body": "hello",
+		},
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("active setup = %d %s", response.Code, response.Body.String())
+	}
+	response = performJSONRequest(t, router, http.MethodPost, "/listed?DO=setup&DONAME=later", map[string]any{
+		"method": http.MethodGet,
+		"response": map[string]any{
+			"status": 200,
+			"body":   "later",
+		},
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("named setup = %d %s", response.Code, response.Body.String())
+	}
+
+	response = performRequest(router, http.MethodPost, "/anywhere?DO=list", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"status":"List"`) {
+		t.Fatalf("list body = %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"state":"active"`) ||
+		!strings.Contains(response.Body.String(), `"state":"saved"`) ||
+		!strings.Contains(response.Body.String(), `"name":"later"`) ||
+		!strings.Contains(response.Body.String(), `"body":"hello"`) {
+		t.Fatalf("list missing expected setups: %s", response.Body.String())
+	}
+
+	var payload struct {
+		Count  int `json:"count"`
+		Setups []struct {
+			State string `json:"state"`
+		} `json:"setups"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if payload.Count != 2 || len(payload.Setups) != 2 {
+		t.Fatalf("list count = %#v", payload)
+	}
+}
+
 func TestInvalidTemplatesAndMathErrorsAreReported(t *testing.T) {
 	router := NewRouter()
 

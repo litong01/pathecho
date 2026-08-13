@@ -490,3 +490,36 @@ func TestStubNamedSetupChainAndDefinitionReset(t *testing.T) {
 	mustStatus(t, globalReset, http.StatusOK)
 	containsJSON(t, globalReset.Body, `"removedDefinitions":1`)
 }
+
+/*
+Example: list configured setups (README "List configured setups").
+
+	curl -X POST 'http://localhost:9095/?DO=list'
+*/
+func TestListConfiguredSetups(t *testing.T) {
+	resetServer(t)
+
+	mustStatus(t, doJSON(t, http.MethodPost, "/users?DO=setup&DOTIME=5", map[string]any{
+		"method": "GET",
+		"response": map[string]any{
+			"status": 200,
+			"headers": map[string]string{
+				"Content-Type": "application/json",
+			},
+			"body": map[string]any{"name": "{{.Q.name}}"},
+		},
+	}), http.StatusCreated)
+	mustStatus(t, doJSON(t, http.MethodPost, "/status?DO=setup&DONAME=status-done", map[string]any{
+		"method":   "GET",
+		"response": map[string]any{"status": 200, "body": "done"},
+	}), http.StatusCreated)
+
+	listed := doRequest(t, http.MethodPost, "/?DO=list", "", nil)
+	mustStatus(t, listed, http.StatusOK)
+	containsJSON(t, listed.Body, `"status":"List"`)
+	containsJSON(t, listed.Body, `"count":2`)
+	containsJSON(t, listed.Body, `"state":"active"`)
+	containsJSON(t, listed.Body, `"state":"saved"`)
+	containsJSON(t, listed.Body, `"name":"status-done"`)
+	containsJSON(t, listed.Body, `"path":"/users"`)
+}

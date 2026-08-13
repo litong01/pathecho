@@ -248,6 +248,20 @@ Notes:
 - Definitions are cleared by `DO=reset` on their path and by the global
   `/RESET`; both report a `removedDefinitions` count.
 
+### List configured setups
+
+Inspect every active setup and every saved named definition. The request path is
+ignored; listing is always global:
+
+```shell
+curl -X POST 'http://localhost:9095/?DO=list'
+```
+
+The response includes `count` and a `setups` array. Each entry has `state`
+(`active` or `saved`), `method`, `path`, remaining `times`, the original
+`response` payload, and when present `name`, `then`, and `delays`. Active setups
+are listed first (path, then method); saved definitions follow (name, then path).
+
 ### Reset responses
 
 Reset one method on a path:
