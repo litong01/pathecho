@@ -108,13 +108,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if r.Method == http.MethodPut {
+	if r.Method == http.MethodPut || r.Method == http.MethodPatch {
 		w.WriteHeader(http.StatusOK)
 	} else {
 		w.WriteHeader(http.StatusCreated)
 	}
 	content := `{"status": "Created", "time": "` + formatted + `"}`
-	if r.Method == http.MethodPut {
+	if r.Method == http.MethodPut || r.Method == http.MethodPatch {
 		content = `{"status": "Updated", "time": "` + formatted + `"}`
 	}
 	_, _ = w.Write([]byte(content))
@@ -218,6 +218,12 @@ func NewRouterWith(stubs *stub.Service, oauthProvider *oauth.Service) *mux.Route
 	})
 
 	r.PathPrefix("/").Methods(http.MethodPut).HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !stubs.ServeConfigured(w, r) {
+			handleRequest(w, r)
+		}
+	})
+
+	r.PathPrefix("/").Methods(http.MethodPatch).HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !stubs.ServeConfigured(w, r) {
 			handleRequest(w, r)
 		}

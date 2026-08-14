@@ -140,7 +140,7 @@ func TestServiceSetupServeResetAndValidation(t *testing.T) {
 
 	recorder = httptest.NewRecorder()
 	request = jsonRequest(http.MethodPost, "/users?DO=setup", map[string]any{
-		"method": "PATCH",
+		"method": "HEAD",
 		"response": map[string]any{
 			"body": "x",
 		},
@@ -265,7 +265,7 @@ func TestServiceSetupServeResetAndValidation(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = jsonRequest(http.MethodPost, "/users?DO=reset", map[string]any{"method": "PATCH"})
+	request = jsonRequest(http.MethodPost, "/users?DO=reset", map[string]any{"method": "HEAD"})
 	service.HandlePathReset(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("invalid reset method = %d", recorder.Code)

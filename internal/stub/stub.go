@@ -618,7 +618,7 @@ func (s *Service) Install(path string, spec Spec) error {
 func (s *Service) install(path string, request setupRequest) (installResult, error) {
 	method := strings.ToUpper(strings.TrimSpace(request.Method))
 	if !supportedMethod(method) {
-		return installResult{}, fmt.Errorf("method must be GET, POST, PUT, or DELETE")
+		return installResult{}, fmt.Errorf("method must be GET, POST, PUT, PATCH, or DELETE")
 	}
 
 	name := strings.TrimSpace(request.Name)
@@ -849,7 +849,7 @@ func (s *Service) HandlePathReset(w http.ResponseWriter, r *http.Request) {
 
 	method := strings.ToUpper(strings.TrimSpace(request.Method))
 	if method != "" && !supportedMethod(method) {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("method must be GET, POST, PUT, or DELETE"))
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("method must be GET, POST, PUT, PATCH, or DELETE"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1186,7 +1186,7 @@ func renderJSONValue(
 
 func supportedMethod(method string) bool {
 	switch method {
-	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete:
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 		return true
 	default:
 		return false

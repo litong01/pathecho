@@ -65,6 +65,10 @@ paths:
             application/json:
               example:
                 patched: true
+    head:
+      responses:
+        "200":
+          description: headers only
   /health:
     get:
       responses:
@@ -87,12 +91,13 @@ components:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Files != 1 || result.Setups != 3 || result.Skipped != 1 {
+	if result.Files != 1 || result.Setups != 4 || result.Skipped != 1 {
 		t.Fatalf("import result = %#v", result)
 	}
 
 	assertBody(t, service, http.MethodGet, "/users/abc", `{"id":"user-1","name":"Sam"}`)
 	assertBody(t, service, http.MethodPost, "/users/abc", `{"age":0,"id":"generated-id"}`)
+	assertBody(t, service, http.MethodPatch, "/users/abc", `{"patched":true}`)
 
 	recorder := httptest.NewRecorder()
 	if service.ServeConfigured(recorder, httptest.NewRequest(http.MethodGet, "/health", nil)) {

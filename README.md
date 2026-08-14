@@ -1,7 +1,7 @@
 # pathecho
 
 HTTP stub server for testing. By default it answers any path with
-method-appropriate responses (GET echoes the request URI; POST/PUT/DELETE
+method-appropriate responses (GET echoes the request URI; POST/PUT/PATCH/DELETE
 return standard success codes). You can also configure per-path, per-method
 stub responses with Go templates, hit limits, response delays, and reset controls.
 
@@ -267,7 +267,7 @@ are listed first (path, then method); saved definitions follow (name, then path)
 
 Mount a directory of OpenAPI 3.x YAML files and set `APIDIR` to that path.
 During startup, pathecho installs one active stub setup per supported operation
-(`GET`, `POST`, `PUT`, `DELETE`) before it begins serving. This only seeds
+(`GET`, `POST`, `PUT`, `PATCH`, `DELETE`) before it begins serving. This only seeds
 setups; request matching and serving are unchanged.
 
 - If `APIDIR` is unset, missing, or empty, startup behaves exactly as before.
@@ -275,7 +275,7 @@ setups; request matching and serving are unchanged.
 - For each operation, pathecho prefers a `2xx` response (especially `200`),
   then `default`. Response bodies prefer `example` / `examples`, otherwise a
   simple value generated from the schema.
-- Unsupported methods such as `PATCH` are skipped.
+- Unsupported methods such as `HEAD` or `OPTIONS` are skipped.
 - After startup, normal `DO=setup` requests can still replace or extend these
   setups. Use `DO=list` to inspect what was imported.
 
@@ -492,10 +492,11 @@ go vet ./...
 
 ## End-to-end tests
 
-The `e2e` package builds the Docker image, starts a container, then exercises
-the same flows documented above (stub setup/templates/resets and the OAuth
-provider grants). Comments in the test files include the equivalent `curl`
-examples.
+The `e2e` package builds the Docker image, starts a container with
+`APIDIR=/apis` mounted from the repo `apis/` directory (see `apis/openapi.yaml`),
+then exercises the same flows documented above (stub setup/templates/resets,
+OpenAPI bootstrap, and the OAuth provider grants). Comments in the test files
+include the equivalent `curl` examples.
 
 Requires Docker. The suite builds `pathecho-e2e:local` unless you point it at
 an existing image:

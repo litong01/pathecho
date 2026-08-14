@@ -35,6 +35,11 @@ func TestDefaultResponses(t *testing.T) {
 	resp = doRequest(t, http.MethodPost, "/anything/here", "application/json", []byte(`{"hello":"world"}`))
 	mustStatus(t, resp, http.StatusCreated)
 	containsJSON(t, resp.Body, `"status": "Created"`)
+
+	// Unconfigured PATCH returns an Updated JSON envelope (same as PUT).
+	resp = doRequest(t, http.MethodPatch, "/anything/here", "application/json", []byte(`{"hello":"world"}`))
+	mustStatus(t, resp, http.StatusOK)
+	containsJSON(t, resp.Body, `"status": "Updated"`)
 }
 
 /*

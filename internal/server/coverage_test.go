@@ -53,6 +53,11 @@ func TestHealthzVersionPutDeleteAndBodyLogging(t *testing.T) {
 		t.Fatalf("default PUT = %d %s", response.Code, response.Body.String())
 	}
 
+	response = performRequest(router, http.MethodPatch, "/resource", `{"name":"patched"}`)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"Updated"`) {
+		t.Fatalf("default PATCH = %d %s", response.Code, response.Body.String())
+	}
+
 	response = performJSONRequest(t, router, http.MethodPost, "/resource?DO=setup", map[string]any{
 		"method": http.MethodPut,
 		"response": map[string]any{
@@ -66,6 +71,21 @@ func TestHealthzVersionPutDeleteAndBodyLogging(t *testing.T) {
 	response = performRequest(router, http.MethodPut, "/resource", "")
 	if response.Code != 202 || response.Body.String() != "configured-put" {
 		t.Fatalf("configured PUT = %d %q", response.Code, response.Body.String())
+	}
+
+	response = performJSONRequest(t, router, http.MethodPost, "/resource?DO=setup", map[string]any{
+		"method": http.MethodPatch,
+		"response": map[string]any{
+			"status": 200,
+			"body":   "configured-patch",
+		},
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("PATCH setup = %d %s", response.Code, response.Body.String())
+	}
+	response = performRequest(router, http.MethodPatch, "/resource", "")
+	if response.Code != http.StatusOK || response.Body.String() != "configured-patch" {
+		t.Fatalf("configured PATCH = %d %q", response.Code, response.Body.String())
 	}
 
 	response = performJSONRequest(t, router, http.MethodPost, "/gone?DO=setup", map[string]any{

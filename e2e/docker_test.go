@@ -47,6 +47,12 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	apisDir := filepath.Join(repoRoot, "apis")
+	if _, err := os.Stat(filepath.Join(apisDir, "openapi.yaml")); err != nil {
+		fmt.Fprintln(os.Stderr, "e2e: apis/openapi.yaml is required:", err)
+		os.Exit(1)
+	}
+
 	port, err := freePort()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "e2e: allocate port:", err)
@@ -75,11 +81,13 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "e2e: skipping build; using image %s\n", imageName)
 	}
 
-	fmt.Fprintf(os.Stderr, "e2e: starting container %s on %s\n", containerName, baseURL)
+	fmt.Fprintf(os.Stderr, "e2e: starting container %s on %s with APIDIR=/apis\n", containerName, baseURL)
 	run := exec.Command(
 		"docker", "run", "-d", "--rm",
 		"--name", containerName,
 		"-p", fmt.Sprintf("%d:8080", port),
+		"-e", "APIDIR=/apis",
+		"-v", apisDir+":/apis:ro",
 		imageName,
 	)
 	run.Stdout = os.Stderr
@@ -166,4 +174,18 @@ func resetServer(t *testing.T) {
 	t.Helper()
 	mustStatus(t, doRequest(t, http.MethodPost, "/RESET", "", nil), http.StatusOK)
 	mustStatus(t, doRequest(t, http.MethodPost, "/oauth?DO=reset", "", nil), http.StatusOK)
+}
+
+// reloadServer restarts the shared container so APIDIR OpenAPI setups are
+// installed again. Use this for OpenAPI bootstrap tests; resetServer alone
+// clears imported setups until the process restarts.
+func reloadServer(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("docker", "restart", containerName).Run(); err != nil {
+		t.Fatalf("docker restart %s: %v", containerName, err)
+	}
+	if err := waitReady(baseURL, readyTimeout); err != nil {
+		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
+		t.Fatalf("container not ready after reload: %v\nlogs:\n%s", err, logs)
+	}
 }

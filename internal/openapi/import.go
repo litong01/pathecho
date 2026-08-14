@@ -272,7 +272,7 @@ func operationToSpec(method string, op *operation, components map[string]any) (s
 
 func stubSupportedMethod(method string) bool {
 	switch method {
-	case "GET", "POST", "PUT", "DELETE":
+	case "GET", "POST", "PUT", "PATCH", "DELETE":
 		return true
 	default:
 		return false
