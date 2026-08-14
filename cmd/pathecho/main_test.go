@@ -11,8 +11,10 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,6 +35,7 @@ func TestRunStartsPlainAndTLSServers(t *testing.T) {
 	t.Setenv("PORT", "0")
 	t.Setenv("TLS_CERT", "")
 	t.Setenv("TLS_KEY", "")
+	t.Setenv("APIDIR", "")
 
 	originalListen := listenAndServe
 	originalTLS := listenAndServeTLS
@@ -104,6 +107,63 @@ func TestRunStartsPlainAndTLSServers(t *testing.T) {
 	}
 }
 
+func TestRunImportsOpenAPIBeforeListen(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "demo.yaml"), []byte(`
+openapi: 3.0.0
+paths:
+  /demo:
+    get:
+      responses:
+        "200":
+          content:
+            application/json:
+              example: {"ok":true}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PORT", "0")
+	t.Setenv("TLS_CERT", "")
+	t.Setenv("TLS_KEY", "")
+	t.Setenv("APIDIR", dir)
+
+	originalListen := listenAndServe
+	t.Cleanup(func() { listenAndServe = originalListen })
+
+	var handler http.Handler
+	listenAndServe = func(server *http.Server) error {
+		handler = server.Handler
+		return nil
+	}
+	if code := run(); code != 0 {
+		t.Fatalf("run exit = %d", code)
+	}
+	if handler == nil {
+		t.Fatal("expected handler")
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/demo", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"ok":true`) {
+		t.Fatalf("imported demo = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRunOpenAPIMissingDirIsNoop(t *testing.T) {
+	t.Setenv("PORT", "0")
+	t.Setenv("TLS_CERT", "")
+	t.Setenv("TLS_KEY", "")
+	t.Setenv("APIDIR", filepath.Join(t.TempDir(), "nope"))
+
+	originalListen := listenAndServe
+	t.Cleanup(func() { listenAndServe = originalListen })
+	listenAndServe = func(*http.Server) error { return nil }
+	if code := run(); code != 0 {
+		t.Fatalf("missing APIDIR exit = %d", code)
+	}
+}
+
 func TestMainExitsOnRunFailure(t *testing.T) {
 	originalExit := osExit
 	originalListen := listenAndServe
@@ -115,6 +175,7 @@ func TestMainExitsOnRunFailure(t *testing.T) {
 	t.Setenv("PORT", "0")
 	t.Setenv("TLS_CERT", "")
 	t.Setenv("TLS_KEY", "")
+	t.Setenv("APIDIR", "")
 	listenAndServe = func(*http.Server) error { return http.ErrServerClosed }
 
 	var exitCode int

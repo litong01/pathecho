@@ -6,7 +6,10 @@ import (
 	"os"
 	"time"
 
+	"github.com/pathecho/internal/oauth"
+	"github.com/pathecho/internal/openapi"
 	"github.com/pathecho/internal/server"
+	"github.com/pathecho/internal/stub"
 	goslog "golang.org/x/exp/slog"
 )
 
@@ -47,7 +50,20 @@ func main() {
 
 func run() int {
 	logger := configureLogger()
-	router := server.NewRouter()
+
+	stubs := stub.NewService()
+	if result, err := openapi.ImportDir(os.Getenv("APIDIR"), stubs); err != nil {
+		logger.Error("openapi import failed", "error", err.Error())
+		return 1
+	} else if result.Setups > 0 || result.Files > 0 {
+		logger.Info("openapi import complete",
+			"files", result.Files,
+			"setups", result.Setups,
+			"skipped", result.Skipped,
+		)
+	}
+
+	router := server.NewRouterWith(stubs, oauth.NewService())
 
 	port := os.Getenv("PORT")
 	if port == "" {

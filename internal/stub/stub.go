@@ -526,61 +526,153 @@ func (s *Service) HandleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	logControlRequest(r, "setup", request)
 
-	method := strings.ToUpper(strings.TrimSpace(request.Method))
-	if !supportedMethod(method) {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("method must be GET, POST, PUT, or DELETE"))
-		return
-	}
-
 	name, err := resolveSetupName(r, request)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
+	request.Name = name
+
 	remaining, err := resolveRemaining(r, request)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
+	if remaining != unlimitedHits {
+		request.Times = &remaining
+	} else {
+		request.Times = nil
+	}
 
-	entry, err := compileEntry(method+" "+r.URL.Path, request, remaining, s.funcs)
+	result, err := s.install(r.URL.Path, request)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err)
+		status := http.StatusBadRequest
+		if isSetupCapacityError(err) {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSONError(w, status, err)
 		return
 	}
 
+	response := map[string]any{
+		"status": "Setup",
+		"method": result.Method,
+		"path":   result.Path,
+		"times":  remainingValue(result.Remaining),
+	}
+	if result.Name != "" {
+		response["status"] = "Saved"
+		response["name"] = result.Name
+	}
+	if len(result.Then) > 0 {
+		response["then"] = result.Then
+	}
+	writeJSON(w, http.StatusCreated, response)
+}
+
+// Spec is a programmatic setup request used by importers (for example OpenAPI).
+type Spec struct {
+	Method   string
+	Name     string
+	Times    *int
+	Delays   json.RawMessage
+	Response SpecResponse
+	Then     []string
+}
+
+// SpecResponse is the response portion of Spec.
+type SpecResponse struct {
+	Status  int
+	Headers map[string]string
+	Body    json.RawMessage
+}
+
+type installResult struct {
+	Method    string
+	Path      string
+	Name      string
+	Remaining int
+	Then      []string
+}
+
+// Install compiles and stores a setup for path without going through HTTP.
+// An empty Name activates the setup immediately; a non-empty Name saves it as a
+// deferred definition. Installing the same method and path again replaces the
+// previous active setup.
+func (s *Service) Install(path string, spec Spec) error {
+	_, err := s.install(path, setupRequest{
+		Method: spec.Method,
+		Name:   spec.Name,
+		Times:  spec.Times,
+		Delays: spec.Delays,
+		Response: setupResponse{
+			Status:  spec.Response.Status,
+			Headers: spec.Response.Headers,
+			Body:    spec.Response.Body,
+		},
+		Then: spec.Then,
+	})
+	return err
+}
+
+func (s *Service) install(path string, request setupRequest) (installResult, error) {
+	method := strings.ToUpper(strings.TrimSpace(request.Method))
+	if !supportedMethod(method) {
+		return installResult{}, fmt.Errorf("method must be GET, POST, PUT, or DELETE")
+	}
+
+	name := strings.TrimSpace(request.Name)
+	if name != "" {
+		if err := validateSetupName(name); err != nil {
+			return installResult{}, err
+		}
+	}
+
+	remaining := unlimitedHits
+	if request.Times != nil {
+		remaining = *request.Times
+		if remaining != unlimitedHits && remaining <= 0 {
+			return installResult{}, fmt.Errorf("times must be a positive integer")
+		}
+	}
+
+	entry, err := compileEntry(method+" "+path, request, remaining, s.funcs)
+	if err != nil {
+		return installResult{}, err
+	}
+
 	if name == "" {
-		if err := s.store.Set(method, r.URL.Path, entry.freshCopy()); err != nil {
-			writeJSONError(w, http.StatusServiceUnavailable, err)
-			return
+		if err := s.store.Set(method, path, entry.freshCopy()); err != nil {
+			return installResult{}, err
 		}
 	} else {
 		definition := &setupDefinition{
 			Name:   name,
 			Method: method,
-			Path:   r.URL.Path,
+			Path:   path,
 			Proto:  entry,
 		}
 		if err := s.definitions.Define(definition); err != nil {
-			writeJSONError(w, http.StatusServiceUnavailable, err)
-			return
+			return installResult{}, err
 		}
 	}
 
-	response := map[string]any{
-		"status": "Setup",
-		"method": method,
-		"path":   r.URL.Path,
-		"times":  remainingValue(remaining),
+	return installResult{
+		Method:    method,
+		Path:      path,
+		Name:      name,
+		Remaining: remaining,
+		Then:      entry.Then,
+	}, nil
+}
+
+func isSetupCapacityError(err error) bool {
+	if err == nil {
+		return false
 	}
-	if name != "" {
-		response["status"] = "Saved"
-		response["name"] = name
-	}
-	if len(entry.Then) > 0 {
-		response["then"] = entry.Then
-	}
-	writeJSON(w, http.StatusCreated, response)
+	message := err.Error()
+	return strings.Contains(message, "response store limit") ||
+		strings.Contains(message, "setup definition limit")
 }
 
 // resolveSetupName reads the setup name from the body or the DONAME query

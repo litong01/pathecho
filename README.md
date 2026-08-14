@@ -10,6 +10,7 @@ stub responses with Go templates, hit limits, response delays, and reset control
 - `cmd/pathecho`: executable startup, logging, and TLS configuration
 - `internal/server`: HTTP router and default request behavior
 - `internal/stub`: configurable stub response engine
+- `internal/openapi`: optional OpenAPI 3.x YAML bootstrap into stub setups (beta)
 - `internal/oauth`: in-memory OAuth/OIDC test provider
 - `internal/httpapi`: shared HTTP control and JSON helpers
 - `e2e`: container-backed end-to-end tests that also double as usage examples
@@ -261,6 +262,29 @@ The response includes `count` and a `setups` array. Each entry has `state`
 (`active` or `saved`), `method`, `path`, remaining `times`, the original
 `response` payload, and when present `name`, `then`, and `delays`. Active setups
 are listed first (path, then method); saved definitions follow (name, then path).
+
+### OpenAPI bootstrap (beta)
+
+Mount a directory of OpenAPI 3.x YAML files and set `APIDIR` to that path.
+During startup, pathecho installs one active stub setup per supported operation
+(`GET`, `POST`, `PUT`, `DELETE`) before it begins serving. This only seeds
+setups; request matching and serving are unchanged.
+
+- If `APIDIR` is unset, missing, or empty, startup behaves exactly as before.
+- `{param}` path segments become `:param` stub paths.
+- For each operation, pathecho prefers a `2xx` response (especially `200`),
+  then `default`. Response bodies prefer `example` / `examples`, otherwise a
+  simple value generated from the schema.
+- Unsupported methods such as `PATCH` are skipped.
+- After startup, normal `DO=setup` requests can still replace or extend these
+  setups. Use `DO=list` to inspect what was imported.
+
+```shell
+docker run -dit -p 9095:8080 --rm \
+  -e APIDIR=/apis \
+  -v "$PWD/apis:/apis:ro" \
+  email4tong/pathecho
+```
 
 ### Reset responses
 

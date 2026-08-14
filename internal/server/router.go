@@ -122,9 +122,20 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func NewRouter() *mux.Router {
+	return NewRouterWith(stub.NewService(), oauth.NewService())
+}
+
+// NewRouterWith wires the HTTP surface onto the provided stub and OAuth
+// services so callers can preload setups (for example from OpenAPI) before
+// serving traffic.
+func NewRouterWith(stubs *stub.Service, oauthProvider *oauth.Service) *mux.Router {
+	if stubs == nil {
+		stubs = stub.NewService()
+	}
+	if oauthProvider == nil {
+		oauthProvider = oauth.NewService()
+	}
 	r := mux.NewRouter()
-	stubs := stub.NewService()
-	oauthProvider := oauth.NewService()
 	logger := goslog.Default()
 
 	r.Path("/healthz").Methods(http.MethodGet).HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
